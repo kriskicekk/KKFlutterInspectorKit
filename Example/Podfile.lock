@@ -1,0 +1,16 @@
+PODS:
+  - KKFlutterInspectorKit (0.1.0)
+
+DEPENDENCIES:
+  - KKFlutterInspectorKit (from `../`)
+
+EXTERNAL SOURCES:
+  KKFlutterInspectorKit:
+    :path: "../"
+
+SPEC CHECKSUMS:
+  KKFlutterInspectorKit: 43467cc74d5d7edc05b3f699d928775dc1dc610c
+
+PODFILE CHECKSUM: 8403b78b0db075c9cdcfb110dc12b6c21eff713e
+
+COCOAPODS: 1.16.2

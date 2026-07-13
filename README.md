@@ -22,7 +22,7 @@ pod 'KKFlutterInspectorKit'
 
 ## Author
 
-kriskice@gmail.com, kriskice9527@gmail.com
+kriskice9527@gmail.com
 
 ## License
 
