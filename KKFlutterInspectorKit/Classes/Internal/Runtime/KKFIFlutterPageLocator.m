@@ -2,6 +2,20 @@
 
 @implementation KKFIFlutterPageLocator
 
+- (FlutterEngine *)
+    flutterEngineForViewController:(FlutterViewController *)viewController {
+    NSAssert(NSThread.isMainThread,
+             @"Flutter page resolution must run on the main thread.");
+    Class flutterViewControllerClass =
+        NSClassFromString(@"FlutterViewController");
+    if (flutterViewControllerClass == Nil ||
+        ![(UIViewController *)viewController
+            isKindOfClass:flutterViewControllerClass]) {
+        return nil;
+    }
+    return viewController.engine;
+}
+
 - (NSArray<FlutterEngine *> *)flutterEnginesInWindow:(UIWindow *)window {
     NSAssert(NSThread.isMainThread,
              @"Flutter page discovery must run on the main thread.");
@@ -37,7 +51,8 @@
     if (flutterViewControllerClass != Nil &&
         [viewController isKindOfClass:flutterViewControllerClass]) {
         UIView *hostView = viewController.viewIfLoaded;
-        FlutterEngine *engine = ((FlutterViewController *)viewController).engine;
+        FlutterEngine *engine = [self flutterEngineForViewController:
+            (FlutterViewController *)viewController];
         if (hostView.window == window &&
             engine != nil &&
             ![seenEngines containsObject:engine]) {

@@ -1,3 +1,10 @@
+//
+//  KKFIFlutterPageLocator.h
+//  KKFlutterInspectorKit
+//
+//  Created by kris cheng on 2026/7/13.
+//
+
 #import "KKFIFlutterCompatibility.h"
 
 NS_ASSUME_NONNULL_BEGIN
@@ -7,6 +14,8 @@ NS_ASSUME_NONNULL_BEGIN
 @interface KKFIFlutterPageLocator : NSObject
 
 - (NSArray<FlutterEngine *> *)flutterEnginesInWindow:(UIWindow *)window;
+- (nullable FlutterEngine *)
+    flutterEngineForViewController:(FlutterViewController *)viewController;
 
 @end
 

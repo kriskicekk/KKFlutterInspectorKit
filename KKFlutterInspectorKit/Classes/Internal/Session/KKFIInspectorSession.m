@@ -1,6 +1,10 @@
 #import "KKFIInspectorSession.h"
 
+#import <math.h>
+
 #import "../Connection/KKFIVMServiceClient.h"
+#import "../Inspector/KKFIInspectorJSON.h"
+#import "../Inspector/KKFIInspectorTreeBuilder.h"
 
 static NSString *const KKFIInspectorSessionErrorDomain =
     @"KKFIInspectorSessionErrorDomain";
@@ -9,6 +13,10 @@ typedef NS_ENUM(NSInteger, KKFIInspectorSessionErrorCode) {
     KKFIInspectorSessionErrorEngineReleased = 1,
     KKFIInspectorSessionErrorTimedOut,
     KKFIInspectorSessionErrorInvalidated,
+    KKFIInspectorSessionErrorInvalidPayload,
+    KKFIInspectorSessionErrorStaleElementReference,
+    KKFIInspectorSessionErrorInvalidScreenshotOptions,
+    KKFIInspectorSessionErrorScreenshotUnavailable,
 };
 
 typedef NS_ENUM(NSUInteger, KKFIInspectorSessionState) {
@@ -24,8 +32,16 @@ typedef NS_ENUM(NSUInteger, KKFIInspectorSessionState) {
 @property(nonatomic) KKFIInspectorSessionState state;
 @property(nonatomic) NSUInteger attemptID;
 @property(nonatomic, strong, nullable) KKFIVMServiceClient *serviceClient;
+@property(nonatomic, strong, nullable) NSURL *vmServiceURL;
+@property(nonatomic, copy, nullable) NSString *isolateID;
+@property(nonatomic, copy, nullable) NSString *activeObjectGroup;
+@property(nonatomic, copy, nullable) NSString *activeSnapshotID;
+@property(nonatomic, copy, nullable) NSString *hierarchyRequestID;
+@property(nonatomic, copy, nullable) NSString *pendingObjectGroup;
 @property(nonatomic, strong)
     NSMutableArray<KKFIInspectorConnectionCompletion> *connectionWaiters;
+@property(nonatomic, strong)
+    NSMutableArray<KKFIHierarchyCompletion> *hierarchyWaiters;
 
 @end
 
@@ -39,6 +55,7 @@ typedef NS_ENUM(NSUInteger, KKFIInspectorSessionState) {
             "com.kkflutterinspector.inspector-session", DISPATCH_QUEUE_SERIAL);
         _state = KKFIInspectorSessionStateIdle;
         _connectionWaiters = [NSMutableArray array];
+        _hierarchyWaiters = [NSMutableArray array];
     }
     return self;
 }
@@ -46,6 +63,8 @@ typedef NS_ENUM(NSUInteger, KKFIInspectorSessionState) {
 - (void)dealloc {
     [_serviceClient close];
 }
+
+#pragma mark - Connection
 
 - (void)ensureConnectedWithTimeout:(NSTimeInterval)timeout
                         completion:(KKFIInspectorConnectionCompletion)completion {
@@ -61,7 +80,6 @@ typedef NS_ENUM(NSUInteger, KKFIInspectorSessionState) {
         if (completionCopy != nil) {
             [self.connectionWaiters addObject:completionCopy];
         }
-
         if (self.state == KKFIInspectorSessionStateConnecting) {
             return;
         }
@@ -70,6 +88,57 @@ typedef NS_ENUM(NSUInteger, KKFIInspectorSessionState) {
         NSUInteger attemptID = ++self.attemptID;
         [self scheduleTimeout:MAX(timeout, 0.1) attemptID:attemptID];
         [self tryConnectWithAttemptID:attemptID];
+    });
+}
+
+- (void)ensureCurrentConnectionWithTimeout:(NSTimeInterval)timeout
+                                completion:(KKFIInspectorConnectionCompletion)completion {
+    KKFIInspectorConnectionCompletion completionCopy = [completion copy];
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (self == nil) {
+            return;
+        }
+
+        FlutterEngine *engine = self.engine;
+        BOOL engineAvailable = engine != nil;
+        NSURL *serviceURL = engine.vmServiceUrl;
+        NSString *isolateID = [engine.isolateId copy];
+        dispatch_async(self.stateQueue, ^{
+            if (!engineAvailable) {
+                completionCopy([self.class
+                    errorWithCode:KKFIInspectorSessionErrorEngineReleased
+                       description:@"The Flutter engine was released."]);
+                return;
+            }
+
+            BOOL identityMatches =
+                self.state == KKFIInspectorSessionStateConnected &&
+                self.serviceClient != nil && serviceURL != nil &&
+                isolateID.length > 0 && [serviceURL isEqual:self.vmServiceURL] &&
+                [isolateID isEqualToString:self.isolateID];
+            if (identityMatches) {
+                completionCopy(nil);
+                return;
+            }
+
+            BOOL connectedIdentityInvalid =
+                self.state == KKFIInspectorSessionStateConnected;
+            BOOL disconnectedIdentityChanged =
+                self.state == KKFIInspectorSessionStateIdle &&
+                self.isolateID.length > 0 && isolateID.length > 0 &&
+                (![isolateID isEqualToString:self.isolateID] ||
+                 (serviceURL != nil && ![serviceURL isEqual:self.vmServiceURL]));
+            if (connectedIdentityInvalid || disconnectedIdentityChanged) {
+                NSError *error = [self.class
+                    errorWithCode:KKFIInspectorSessionErrorStaleElementReference
+                       description:@"The Flutter isolate changed. Fetch a new hierarchy before using old elements."];
+                [self retireCurrentConnectionWithError:error];
+            }
+
+            [self ensureConnectedWithTimeout:timeout completion:completionCopy];
+        });
     });
 }
 
@@ -106,9 +175,6 @@ typedef NS_ENUM(NSUInteger, KKFIInspectorSessionState) {
                 return;
             }
 
-            // A retry can already be queued when a new handshake starts. Let
-            // the in-flight getVM request finish instead of creating a second
-            // WebSocket for the same attempt.
             if (self.serviceClient != nil) {
                 return;
             }
@@ -124,7 +190,6 @@ typedef NS_ENUM(NSUInteger, KKFIInspectorSessionState) {
             }
 
             self.serviceClient = client;
-
             __weak typeof(self) weakSession = self;
             __weak KKFIVMServiceClient *weakClient = client;
             client.disconnectHandler = ^(__unused NSError *error) {
@@ -164,6 +229,15 @@ typedef NS_ENUM(NSUInteger, KKFIInspectorSessionState) {
                     return;
                 }
 
+                if (self.isolateID.length > 0 &&
+                    ![self.isolateID isEqualToString:isolateID]) {
+                    NSError *staleError = [self.class
+                        errorWithCode:KKFIInspectorSessionErrorStaleElementReference
+                           description:@"The Flutter isolate changed. Fetch a new hierarchy before using old elements."];
+                    [self abandonSnapshotStateWithError:staleError];
+                }
+                self.vmServiceURL = serviceURL;
+                self.isolateID = isolateID;
                 [self finishAttempt:attemptID error:nil];
             }];
         });
@@ -225,21 +299,461 @@ typedef NS_ENUM(NSUInteger, KKFIInspectorSessionState) {
     }
 }
 
+#pragma mark - Hierarchy
+
+- (void)fetchHierarchyWithFallbackRootSize:(CGSize)rootSize
+                       excludedWidgetTypes:(NSSet<NSString *> *)excludedWidgetTypes
+                                completion:(KKFIHierarchyCompletion)completion {
+    KKFIHierarchyCompletion completionCopy = [completion copy];
+    NSSet<NSString *> *excludedWidgetTypesCopy = [excludedWidgetTypes copy];
+    [self ensureCurrentConnectionWithTimeout:2.5
+                                  completion:^(NSError *connectionError) {
+        if (connectionError != nil) {
+            completionCopy(nil, connectionError);
+            return;
+        }
+
+        [self.hierarchyWaiters addObject:completionCopy];
+        if (self.hierarchyRequestID != nil) {
+            return;
+        }
+
+        NSString *requestID = NSUUID.UUID.UUIDString;
+        NSString *objectGroup =
+            [@"kkfi-" stringByAppendingString:NSUUID.UUID.UUIDString];
+        NSString *isolateID = self.isolateID;
+        KKFIVMServiceClient *client = self.serviceClient;
+        self.hierarchyRequestID = requestID;
+        self.pendingObjectGroup = objectGroup;
+
+        [self fetchRootWidgetTreeUsingClient:client
+                                   isolateID:isolateID
+                                 objectGroup:objectGroup
+                                  completion:^(id widgetPayload,
+                                               NSError *treeError) {
+            if (![self.hierarchyRequestID isEqualToString:requestID]) {
+                return;
+            }
+            if (treeError != nil) {
+                [self finishHierarchyRequestID:requestID
+                                    objectGroup:objectGroup
+                                        snapshot:nil
+                                           error:treeError];
+                return;
+            }
+
+            NSDictionary *widgetRoot =
+                [widgetPayload isKindOfClass:NSDictionary.class]
+                    ? widgetPayload
+                    : nil;
+            NSString *rootObjectID =
+                [KKFIInspectorJSON nodeIDFromDictionary:widgetRoot];
+            if (rootObjectID.length == 0) {
+                NSError *error = [self.class
+                    errorWithCode:KKFIInspectorSessionErrorInvalidPayload
+                       description:@"The Flutter Widget tree root has no Inspector object ID."];
+                [self finishHierarchyRequestID:requestID
+                                    objectGroup:objectGroup
+                                        snapshot:nil
+                                           error:error];
+                return;
+            }
+
+            NSDictionary *params = @{
+                @"isolateId" : isolateID,
+                @"id" : rootObjectID,
+                @"groupName" : objectGroup,
+                @"subtreeDepth" : @"100",
+            };
+            [client callMethod:@"ext.flutter.inspector.getLayoutExplorerNode"
+                        params:params
+                    completion:^(NSDictionary *response, NSError *layoutError) {
+                if (![self.hierarchyRequestID isEqualToString:requestID]) {
+                    return;
+                }
+                id layoutPayload = layoutError == nil
+                    ? [KKFIInspectorJSON normalizedPayloadFromResponse:response]
+                    : nil;
+                if (layoutError != nil ||
+                    ![layoutPayload isKindOfClass:NSDictionary.class]) {
+                    NSError *error = layoutError ?: [self.class
+                        errorWithCode:KKFIInspectorSessionErrorInvalidPayload
+                           description:@"The Flutter Layout Explorer did not return an object."];
+                    [self finishHierarchyRequestID:requestID
+                                        objectGroup:objectGroup
+                                            snapshot:nil
+                                               error:error];
+                    return;
+                }
+
+                NSError *buildError = nil;
+                KKFIHierarchySnapshot *snapshot = [KKFIInspectorTreeBuilder
+                    snapshotFromLayoutPayload:layoutPayload
+                                widgetPayload:widgetPayload
+                                 rootObjectID:rootObjectID
+                             fallbackRootSize:rootSize
+                                    isolateID:isolateID
+                                  objectGroup:objectGroup
+                                   snapshotID:requestID
+                           excludedWidgetTypes:excludedWidgetTypesCopy
+                                        error:&buildError];
+                [self finishHierarchyRequestID:requestID
+                                    objectGroup:objectGroup
+                                        snapshot:snapshot
+                                           error:buildError];
+            }];
+        }];
+    }];
+}
+
+- (void)fetchRootWidgetTreeUsingClient:(KKFIVMServiceClient *)client
+                              isolateID:(NSString *)isolateID
+                            objectGroup:(NSString *)objectGroup
+                             completion:(void (^)(id _Nullable payload,
+                                                  NSError *_Nullable error))completion {
+    NSDictionary *params = @{
+        @"isolateId" : isolateID,
+        @"groupName" : objectGroup,
+        @"isSummaryTree" : @"true",
+        @"withPreviews" : @"true",
+        @"fullDetails" : @"true",
+    };
+    [client callMethod:@"ext.flutter.inspector.getRootWidgetTree"
+                params:params
+            completion:^(NSDictionary *response, NSError *error) {
+        if (error == nil) {
+            completion([KKFIInspectorJSON normalizedPayloadFromResponse:response],
+                       nil);
+            return;
+        }
+
+        [client callMethod:@"ext.flutter.inspector.getRootWidgetSummaryTree"
+                    params:@{
+                        @"isolateId" : isolateID,
+                        @"objectGroup" : objectGroup,
+                    }
+                completion:^(NSDictionary *legacyResponse,
+                             NSError *legacyError) {
+            completion(legacyError == nil
+                           ? [KKFIInspectorJSON
+                                 normalizedPayloadFromResponse:legacyResponse]
+                           : nil,
+                       legacyError);
+        }];
+    }];
+}
+
+- (void)finishHierarchyRequestID:(NSString *)requestID
+                      objectGroup:(NSString *)objectGroup
+                          snapshot:(KKFIHierarchySnapshot *)snapshot
+                             error:(NSError *)error {
+    if (![self.hierarchyRequestID isEqualToString:requestID]) {
+        return;
+    }
+
+    self.hierarchyRequestID = nil;
+    self.pendingObjectGroup = nil;
+    NSArray<KKFIHierarchyCompletion> *waiters = self.hierarchyWaiters.copy;
+    [self.hierarchyWaiters removeAllObjects];
+
+    if (snapshot == nil && error == nil) {
+        error = [self.class
+            errorWithCode:KKFIInspectorSessionErrorInvalidPayload
+               description:@"The Flutter hierarchy could not be built."];
+    }
+
+    if (snapshot != nil && error == nil) {
+        NSString *oldObjectGroup = self.activeObjectGroup;
+        self.activeObjectGroup = objectGroup;
+        self.activeSnapshotID = snapshot.snapshotID;
+        if (oldObjectGroup.length > 0 &&
+            ![oldObjectGroup isEqualToString:objectGroup]) {
+            [self disposeObjectGroup:oldObjectGroup
+                         usingClient:self.serviceClient
+                           isolateID:self.isolateID
+                          completion:nil];
+        }
+    } else {
+        [self disposeObjectGroup:objectGroup
+                     usingClient:self.serviceClient
+                       isolateID:self.isolateID
+                      completion:nil];
+    }
+
+    for (KKFIHierarchyCompletion waiter in waiters) {
+        waiter(snapshot, error);
+    }
+}
+
+#pragma mark - Properties
+
+- (void)fetchPropertiesForElement:(KKFIElementReference *)reference
+                       completion:(KKFIPropertiesCompletion)completion {
+    KKFIPropertiesCompletion completionCopy = [completion copy];
+    [self ensureCurrentConnectionWithTimeout:2.5
+                                  completion:^(NSError *connectionError) {
+        if (connectionError != nil) {
+            completionCopy(nil, connectionError);
+            return;
+        }
+
+        NSError *referenceError = [self validationErrorForReference:reference];
+        if (referenceError != nil) {
+            completionCopy(nil, referenceError);
+            return;
+        }
+
+        NSString *snapshotID = reference.snapshotID;
+        NSDictionary *params = @{
+            @"isolateId" : self.isolateID,
+            @"arg" : reference.objectID,
+            @"objectGroup" : reference.objectGroup,
+        };
+        [self.serviceClient callMethod:@"ext.flutter.inspector.getProperties"
+                                params:params
+                            completion:^(NSDictionary *response,
+                                         NSError *error) {
+            NSError *currentReferenceError =
+                [self validationErrorForReference:reference];
+            if (currentReferenceError != nil ||
+                ![self.activeSnapshotID isEqualToString:snapshotID]) {
+                completionCopy(nil, currentReferenceError ?: [self.class
+                    errorWithCode:KKFIInspectorSessionErrorStaleElementReference
+                       description:@"The Flutter element belongs to an old hierarchy snapshot."]);
+                return;
+            }
+            if (error != nil) {
+                completionCopy(nil, error);
+                return;
+            }
+
+            id payload = [KKFIInspectorJSON normalizedPayloadFromResponse:response];
+            NSDictionary *payloadDictionary =
+                [payload isKindOfClass:NSDictionary.class] ? payload : nil;
+            NSArray *values = [payload isKindOfClass:NSArray.class]
+                ? payload
+                : ([payloadDictionary[@"properties"] isKindOfClass:NSArray.class]
+                       ? payloadDictionary[@"properties"]
+                       : nil);
+            if (values == nil) {
+                completionCopy(nil, [self.class
+                    errorWithCode:KKFIInspectorSessionErrorInvalidPayload
+                       description:@"Flutter Inspector properties did not return an array."]);
+                return;
+            }
+
+            NSMutableArray<NSDictionary *> *properties = [NSMutableArray array];
+            for (id value in values) {
+                if ([value isKindOfClass:NSDictionary.class]) {
+                    [properties addObject:value];
+                }
+            }
+            completionCopy(properties.copy, nil);
+        }];
+    }];
+}
+
+#pragma mark - Screenshot
+
+- (void)captureScreenshotForElement:(KKFIElementReference *)reference
+                            options:(KKFIScreenshotOptions *)options
+                         completion:(KKFIScreenshotCompletion)completion {
+    KKFIScreenshotOptions *optionsCopy = [options copy];
+    KKFIScreenshotCompletion completionCopy = [completion copy];
+    [self ensureCurrentConnectionWithTimeout:2.5
+                                  completion:^(NSError *connectionError) {
+        if (connectionError != nil) {
+            completionCopy(nil, connectionError);
+            return;
+        }
+
+        NSError *referenceError = [self validationErrorForReference:reference];
+        if (referenceError != nil) {
+            completionCopy(nil, referenceError);
+            return;
+        }
+
+        CGSize size = optionsCopy.logicalSize;
+        CGFloat margin = optionsCopy.margin;
+        CGFloat ratio = optionsCopy.maxPixelRatio;
+        BOOL validOptions = isfinite(size.width) && isfinite(size.height) &&
+            size.width > 0 && size.height > 0 && isfinite(margin) &&
+            margin >= 0 && isfinite(ratio) && ratio > 0;
+        if (!validOptions) {
+            completionCopy(nil, [self.class
+                errorWithCode:KKFIInspectorSessionErrorInvalidScreenshotOptions
+                   description:@"Screenshot size, margin, and pixel ratio must be finite positive values."]);
+            return;
+        }
+
+        NSInteger width = (NSInteger)MIN(
+            4096.0, ceil((size.width + margin * 2) * ratio));
+        NSInteger height = (NSInteger)MIN(
+            4096.0, ceil((size.height + margin * 2) * ratio));
+        NSString *snapshotID = reference.snapshotID;
+        NSDictionary *params = @{
+            @"isolateId" : self.isolateID,
+            @"id" : reference.objectID,
+            @"width" : [NSString stringWithFormat:@"%ld", (long)MAX(width, 1)],
+            @"height" : [NSString stringWithFormat:@"%ld", (long)MAX(height, 1)],
+            @"margin" : [NSString stringWithFormat:@"%.3f", margin],
+            @"maxPixelRatio" : [NSString stringWithFormat:@"%.3f", ratio],
+            @"debugPaint" : optionsCopy.debugPaint ? @"true" : @"false",
+        };
+        [self.serviceClient callMethod:@"ext.flutter.inspector.screenshot"
+                                params:params
+                            completion:^(NSDictionary *response,
+                                         NSError *error) {
+            NSError *currentReferenceError =
+                [self validationErrorForReference:reference];
+            if (currentReferenceError != nil ||
+                ![self.activeSnapshotID isEqualToString:snapshotID]) {
+                completionCopy(nil, currentReferenceError ?: [self.class
+                    errorWithCode:KKFIInspectorSessionErrorStaleElementReference
+                       description:@"The Flutter element belongs to an old hierarchy snapshot."]);
+                return;
+            }
+            if (error != nil) {
+                completionCopy(nil, error);
+                return;
+            }
+
+            id payload = [KKFIInspectorJSON normalizedPayloadFromResponse:response];
+            if (![payload isKindOfClass:NSString.class]) {
+                completionCopy(nil, [self.class
+                    errorWithCode:KKFIInspectorSessionErrorScreenshotUnavailable
+                       description:@"Flutter Inspector could not capture this element."]);
+                return;
+            }
+            NSData *data = [[NSData alloc]
+                initWithBase64EncodedString:payload
+                                    options:NSDataBase64DecodingIgnoreUnknownCharacters];
+            UIImage *image = data == nil ? nil : [UIImage imageWithData:data];
+            if (image == nil) {
+                completionCopy(nil, [self.class
+                    errorWithCode:KKFIInspectorSessionErrorInvalidPayload
+                       description:@"The Flutter screenshot PNG could not be decoded."]);
+                return;
+            }
+            completionCopy([[KKFIScreenshotResult alloc] initWithImage:image
+                                                               pngData:data],
+                           nil);
+        }];
+    }];
+}
+
+#pragma mark - Snapshot lifetime
+
+- (NSError *)validationErrorForReference:(KKFIElementReference *)reference {
+    BOOL valid = reference.objectID.length > 0 &&
+        [reference.isolateID isEqualToString:self.isolateID] &&
+        [reference.objectGroup isEqualToString:self.activeObjectGroup] &&
+        [reference.snapshotID isEqualToString:self.activeSnapshotID];
+    return valid ? nil : [self.class
+        errorWithCode:KKFIInspectorSessionErrorStaleElementReference
+           description:@"The Flutter element belongs to an old hierarchy snapshot."];
+}
+
+- (void)disposeObjectGroup:(NSString *)objectGroup
+               usingClient:(KKFIVMServiceClient *)client
+                 isolateID:(NSString *)isolateID
+                completion:(dispatch_block_t)completion {
+    if (objectGroup.length == 0 || client == nil || isolateID.length == 0) {
+        if (completion != nil) {
+            completion();
+        }
+        return;
+    }
+    [client callMethod:@"ext.flutter.inspector.disposeGroup"
+                params:@{
+                    @"isolateId" : isolateID,
+                    @"objectGroup" : objectGroup,
+                }
+            completion:^(__unused NSDictionary *response,
+                         __unused NSError *error) {
+        if (completion != nil) {
+            completion();
+        }
+    }];
+}
+
+- (void)abandonSnapshotStateWithError:(NSError *)error {
+    self.activeObjectGroup = nil;
+    self.activeSnapshotID = nil;
+    self.hierarchyRequestID = nil;
+    self.pendingObjectGroup = nil;
+    NSArray<KKFIHierarchyCompletion> *waiters = self.hierarchyWaiters.copy;
+    [self.hierarchyWaiters removeAllObjects];
+    for (KKFIHierarchyCompletion waiter in waiters) {
+        waiter(nil, error);
+    }
+}
+
+- (void)retireCurrentConnectionWithError:(NSError *)error {
+    KKFIVMServiceClient *client = self.serviceClient;
+    NSString *isolateID = self.isolateID;
+    NSMutableArray<NSString *> *groups = [NSMutableArray array];
+    if (self.activeObjectGroup.length > 0) {
+        [groups addObject:self.activeObjectGroup];
+    }
+    if (self.pendingObjectGroup.length > 0 &&
+        ![groups containsObject:self.pendingObjectGroup]) {
+        [groups addObject:self.pendingObjectGroup];
+    }
+
+    self.serviceClient = nil;
+    self.vmServiceURL = nil;
+    self.isolateID = nil;
+    self.state = KKFIInspectorSessionStateIdle;
+    [self abandonSnapshotStateWithError:error];
+    [self disposeObjectGroups:groups
+                  usingClient:client
+                    isolateID:isolateID
+                   completion:^{
+        [client close];
+    }];
+}
+
+- (void)disposeObjectGroups:(NSArray<NSString *> *)groups
+                usingClient:(KKFIVMServiceClient *)client
+                  isolateID:(NSString *)isolateID
+                 completion:(dispatch_block_t)completion {
+    NSString *firstGroup = groups.firstObject;
+    if (firstGroup.length == 0) {
+        if (completion != nil) {
+            completion();
+        }
+        return;
+    }
+    NSArray<NSString *> *remaining =
+        [groups subarrayWithRange:NSMakeRange(1, groups.count - 1)];
+    [self disposeObjectGroup:firstGroup
+                 usingClient:client
+                   isolateID:isolateID
+                  completion:^{
+        [self disposeObjectGroups:remaining
+                      usingClient:client
+                        isolateID:isolateID
+                       completion:completion];
+    }];
+}
+
+#pragma mark - Invalidation
+
 - (void)invalidate {
     dispatch_async(self.stateQueue, ^{
         self.attemptID += 1;
-        self.state = KKFIInspectorSessionStateIdle;
-        [self clearConnection];
-
         NSError *error = [self.class
             errorWithCode:KKFIInspectorSessionErrorInvalidated
                description:@"The Flutter Inspector session was invalidated."];
-        NSArray<KKFIInspectorConnectionCompletion> *waiters =
+
+        NSArray<KKFIInspectorConnectionCompletion> *connectionWaiters =
             self.connectionWaiters.copy;
         [self.connectionWaiters removeAllObjects];
-        for (KKFIInspectorConnectionCompletion waiter in waiters) {
+        for (KKFIInspectorConnectionCompletion waiter in connectionWaiters) {
             waiter(error);
         }
+        [self retireCurrentConnectionWithError:error];
     });
 }
 
