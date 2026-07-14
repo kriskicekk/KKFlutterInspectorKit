@@ -110,8 +110,14 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
         ? @"transparent"
         : [self hierarchyRoleForWidgetType:baseWidgetType
                           renderObjectType:renderObjectType];
-    BOOL hasGeometry = objectID.length > 0 && foundSize && size.width > 0 &&
-        size.height > 0;
+    BOOL isSpacingContent = [baseWidgetType isEqualToString:@"SizedBox"] ||
+        [baseWidgetType isEqualToString:@"Spacer"];
+    // A spacing widget is intentional layout content even when one dimension
+    // is zero (for example SizedBox(height: 8) inside a Column). Keep it in the
+    // hierarchy so clients can display the constraint instead of silently
+    // dropping the node because it has no drawable area.
+    BOOL hasGeometry = objectID.length > 0 && foundSize &&
+        (isSpacingContent || (size.width > 0 && size.height > 0));
     BOOL isVisual = hasGeometry && [hierarchyRole isEqualToString:@"visual"];
 
     NSDictionary *relation = [self relationForLayoutNode:layoutNode
