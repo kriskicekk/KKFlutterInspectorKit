@@ -1,16 +1,27 @@
 PODS:
+  - Flutter (1.0.0)
+  - FlutterPluginRegistrant (0.0.1):
+    - Flutter
   - KKFlutterInspectorKit (0.1.0)
 
 DEPENDENCIES:
+  - Flutter (from `flutter_module/.ios/Flutter`)
+  - FlutterPluginRegistrant (from `flutter_module/.ios/Flutter/FlutterPluginRegistrant`)
   - KKFlutterInspectorKit (from `../`)
 
 EXTERNAL SOURCES:
+  Flutter:
+    :path: flutter_module/.ios/Flutter
+  FlutterPluginRegistrant:
+    :path: flutter_module/.ios/Flutter/FlutterPluginRegistrant
   KKFlutterInspectorKit:
     :path: "../"
 
 SPEC CHECKSUMS:
-  KKFlutterInspectorKit: ca8b9d0228f3865c66f94a45e50fcca3ba635946
+  Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
+  FlutterPluginRegistrant: 1bf2b93dcc6a731089dfe77f7a867be153c5008f
+  KKFlutterInspectorKit: 712f6f75670bf662789e62ffd736eac1c9856c10
 
-PODFILE CHECKSUM: 1ae6a471f142695515dcb4a7176b359ebacaebad
+PODFILE CHECKSUM: 13994ced36f89a87d1b60fe38449ccac9b770685
 
 COCOAPODS: 1.16.2

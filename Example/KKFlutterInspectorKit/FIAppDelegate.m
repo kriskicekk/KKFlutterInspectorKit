@@ -8,11 +8,28 @@
 
 #import "FIAppDelegate.h"
 
+#import <Flutter/Flutter.h>
+
+@interface FIAppDelegate ()
+
+@property(nonatomic, strong, readwrite) FlutterEngine *flutterEngine;
+
+@end
+
 @implementation FIAppDelegate
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
 {
-    // Override point for customization after application launch.
+    self.flutterEngine = [[FlutterEngine alloc]
+        initWithName:@"com.kkflutterinspector.example"];
+    [self.flutterEngine runWithEntrypoint:nil];
+
+    UIViewController *rootViewController = self.window.rootViewController;
+    if (rootViewController != nil &&
+        ![rootViewController isKindOfClass:UINavigationController.class]) {
+        self.window.rootViewController = [[UINavigationController alloc]
+            initWithRootViewController:rootViewController];
+    }
     return YES;
 }
 
