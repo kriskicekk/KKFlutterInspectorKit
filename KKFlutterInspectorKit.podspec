@@ -29,7 +29,9 @@ Pod::Spec.new do |s|
       :git => 'https://github.com/kriskicekk/KKFlutterInspectorKit.git',
       :tag => s.version.to_s
   }
-  s.ios.deployment_target = '12.0'
+  s.ios.deployment_target = '13.0'
   s.source_files = 'KKFlutterInspectorKit/Classes/**/*.{h,m,mm}'
-  s.public_header_files = 'KKFlutterInspectorKit/Classes/**/*.h'
+  s.public_header_files = 'KKFlutterInspectorKit/Classes/KKFlutterInspector.h'
+  s.private_header_files = 'KKFlutterInspectorKit/Classes/Internal/**/*.h'
+  s.frameworks = 'Foundation', 'UIKit'
 end

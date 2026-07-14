@@ -7,6 +7,7 @@
 //
 
 @import XCTest;
+@import KKFlutterInspectorKit;
 
 @interface Tests : XCTestCase
 
@@ -26,10 +27,15 @@
     [super tearDown];
 }
 
-- (void)testExample
+- (void)testWarmUpWithoutFlutterRuntimeDoesNotFail
 {
-    XCTFail(@"No implementation for \"%s\"", __PRETTY_FUNCTION__);
+    KKFlutterInspector *inspector = [[KKFlutterInspector alloc] init];
+    UIWindow *window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    window.rootViewController = [[UIViewController alloc] init];
+
+    [inspector warmUpWindow:window];
+
+    XCTAssertNotNil(inspector);
 }
 
 @end
-
