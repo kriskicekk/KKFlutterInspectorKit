@@ -31,7 +31,15 @@ Pod::Spec.new do |s|
   }
   s.ios.deployment_target = '13.0'
   s.source_files = 'KKFlutterInspectorKit/Classes/**/*.{h,m,mm}'
-  s.public_header_files = 'KKFlutterInspectorKit/Classes/KKFlutterInspector.h'
-  s.private_header_files = 'KKFlutterInspectorKit/Classes/Internal/**/*.h'
+  s.public_header_files = [
+    'KKFlutterInspectorKit/Classes/KKFlutterInspector.h',
+    'KKFlutterInspectorKit/Classes/Internal/Model/KKFIInspectorModels.h'
+  ]
+  s.private_header_files = [
+    'KKFlutterInspectorKit/Classes/Internal/Connection/*.h',
+    'KKFlutterInspectorKit/Classes/Internal/Inspector/*.h',
+    'KKFlutterInspectorKit/Classes/Internal/Runtime/*.h',
+    'KKFlutterInspectorKit/Classes/Internal/Session/*.h'
+  ]
   s.frameworks = 'Foundation', 'UIKit'
 end
