@@ -31,11 +31,10 @@
 	</dict>
 	<key>NSBonjourServices</key>
 	<array>
-		<string>_dartVmService._tcp</string>
 		<string>_pickview._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Allow PickView and Flutter tools on this Mac to discover and inspect the embedded Flutter page.</string>
+	<string>Allow PickView on this Mac to discover and inspect this app.</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
