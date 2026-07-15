@@ -60,6 +60,11 @@ typedef NS_ENUM(NSInteger, KKFIVMServiceErrorCode) {
         NSInteger generation = self.generation;
         NSURLSessionWebSocketTask *task =
             [self.urlSession webSocketTaskWithURL:self.webSocketURL];
+        // Inspector layout/detail payloads can exceed NSURLSession's default
+        // WebSocket message limit on widget-rich or deeply nested pages.
+        // Keep a bounded allowance so a valid VM Service response is not
+        // reported as NSPOSIXError "Message too long" before JSON decoding.
+        task.maximumMessageSize = 16 * 1024 * 1024;
         self.task = task;
         [task resume];
         [self receiveNextMessageForTask:task generation:generation];
