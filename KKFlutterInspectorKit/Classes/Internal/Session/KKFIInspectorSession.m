@@ -3,8 +3,8 @@
 #import <math.h>
 
 #import "../Connection/KKFIVMServiceClient.h"
+#import "../Hierarchy/KKFIHierarchyRequest.h"
 #import "../Inspector/KKFIInspectorJSON.h"
-#import "../Inspector/KKFIInspectorTreeBuilder.h"
 
 static NSString *const KKFIInspectorSessionErrorDomain =
     @"KKFIInspectorSessionErrorDomain";
@@ -36,8 +36,7 @@ typedef NS_ENUM(NSUInteger, KKFIInspectorSessionState) {
 @property(nonatomic, copy, nullable) NSString *isolateID;
 @property(nonatomic, copy, nullable) NSString *activeObjectGroup;
 @property(nonatomic, copy, nullable) NSString *activeSnapshotID;
-@property(nonatomic, copy, nullable) NSString *hierarchyRequestID;
-@property(nonatomic, copy, nullable) NSString *pendingObjectGroup;
+@property(nonatomic, strong, nullable) KKFIHierarchyRequest *hierarchyRequest;
 @property(nonatomic, strong)
     NSMutableArray<KKFIInspectorConnectionCompletion> *connectionWaiters;
 @property(nonatomic, strong)
@@ -314,145 +313,46 @@ typedef NS_ENUM(NSUInteger, KKFIInspectorSessionState) {
         }
 
         [self.hierarchyWaiters addObject:completionCopy];
-        if (self.hierarchyRequestID != nil) {
+        if (self.hierarchyRequest != nil) {
             return;
         }
 
-        NSString *requestID = NSUUID.UUID.UUIDString;
+        NSString *snapshotID = NSUUID.UUID.UUIDString;
         NSString *objectGroup =
             [@"kkfi-" stringByAppendingString:NSUUID.UUID.UUIDString];
-        NSString *isolateID = self.isolateID;
-        KKFIVMServiceClient *client = self.serviceClient;
-        self.hierarchyRequestID = requestID;
-        self.pendingObjectGroup = objectGroup;
+        KKFIHierarchyRequest *request = [[KKFIHierarchyRequest alloc]
+            initWithClient:self.serviceClient
+                 isolateID:self.isolateID
+               objectGroup:objectGroup
+                snapshotID:snapshotID];
+        self.hierarchyRequest = request;
 
-        [self fetchRootWidgetTreeUsingClient:client
-                                   isolateID:isolateID
-                                 objectGroup:objectGroup
-                                  completion:^(id widgetPayload,
-                                               NSError *treeError) {
-            if (![self.hierarchyRequestID isEqualToString:requestID]) {
+        __weak typeof(self) weakSelf = self;
+        __weak KKFIHierarchyRequest *weakRequest = request;
+        [request startWithFallbackRootSize:rootSize
+                      excludedWidgetTypes:excludedWidgetTypesCopy
+                               completion:^(KKFIHierarchySnapshot *snapshot,
+                                            NSError *error) {
+            __strong typeof(weakSelf) self = weakSelf;
+            KKFIHierarchyRequest *completedRequest = weakRequest;
+            if (self == nil || completedRequest == nil) {
                 return;
             }
-            if (treeError != nil) {
-                [self finishHierarchyRequestID:requestID
-                                    objectGroup:objectGroup
-                                        snapshot:nil
-                                           error:treeError];
-                return;
-            }
-
-            NSDictionary *widgetRoot =
-                [widgetPayload isKindOfClass:NSDictionary.class]
-                    ? widgetPayload
-                    : nil;
-            NSString *rootObjectID =
-                [KKFIInspectorJSON nodeIDFromDictionary:widgetRoot];
-            if (rootObjectID.length == 0) {
-                NSError *error = [self.class
-                    errorWithCode:KKFIInspectorSessionErrorInvalidPayload
-                       description:@"The Flutter Widget tree root has no Inspector object ID."];
-                [self finishHierarchyRequestID:requestID
-                                    objectGroup:objectGroup
-                                        snapshot:nil
-                                           error:error];
-                return;
-            }
-
-            NSDictionary *params = @{
-                @"isolateId" : isolateID,
-                @"id" : rootObjectID,
-                @"groupName" : objectGroup,
-                @"subtreeDepth" : @"100",
-            };
-            [client callMethod:@"ext.flutter.inspector.getLayoutExplorerNode"
-                        params:params
-                    completion:^(NSDictionary *response, NSError *layoutError) {
-                if (![self.hierarchyRequestID isEqualToString:requestID]) {
-                    return;
-                }
-                id layoutPayload = layoutError == nil
-                    ? [KKFIInspectorJSON normalizedPayloadFromResponse:response]
-                    : nil;
-                if (layoutError != nil ||
-                    ![layoutPayload isKindOfClass:NSDictionary.class]) {
-                    NSError *error = layoutError ?: [self.class
-                        errorWithCode:KKFIInspectorSessionErrorInvalidPayload
-                           description:@"The Flutter Layout Explorer did not return an object."];
-                    [self finishHierarchyRequestID:requestID
-                                        objectGroup:objectGroup
-                                            snapshot:nil
-                                               error:error];
-                    return;
-                }
-
-                NSError *buildError = nil;
-                KKFIHierarchySnapshot *snapshot = [KKFIInspectorTreeBuilder
-                    snapshotFromLayoutPayload:layoutPayload
-                                widgetPayload:widgetPayload
-                                 rootObjectID:rootObjectID
-                             fallbackRootSize:rootSize
-                                    isolateID:isolateID
-                                  objectGroup:objectGroup
-                                   snapshotID:requestID
-                           excludedWidgetTypes:excludedWidgetTypesCopy
-                                        error:&buildError];
-                [self finishHierarchyRequestID:requestID
-                                    objectGroup:objectGroup
-                                        snapshot:snapshot
-                                           error:buildError];
-            }];
+            [self finishHierarchyRequest:completedRequest
+                                snapshot:snapshot
+                                   error:error];
         }];
     }];
 }
 
-- (void)fetchRootWidgetTreeUsingClient:(KKFIVMServiceClient *)client
-                              isolateID:(NSString *)isolateID
-                            objectGroup:(NSString *)objectGroup
-                             completion:(void (^)(id _Nullable payload,
-                                                  NSError *_Nullable error))completion {
-    NSDictionary *params = @{
-        @"isolateId" : isolateID,
-        @"groupName" : objectGroup,
-        @"isSummaryTree" : @"true",
-        @"withPreviews" : @"true",
-        @"fullDetails" : @"true",
-    };
-    [client callMethod:@"ext.flutter.inspector.getRootWidgetTree"
-                params:params
-            completion:^(NSDictionary *response, NSError *error) {
-        if (error == nil) {
-            completion([KKFIInspectorJSON normalizedPayloadFromResponse:response],
-                       nil);
-            return;
-        }
-
-        [client callMethod:@"ext.flutter.inspector.getRootWidgetSummaryTree"
-                    params:@{
-                        @"isolateId" : isolateID,
-                        @"objectGroup" : objectGroup,
-                    }
-                completion:^(NSDictionary *legacyResponse,
-                             NSError *legacyError) {
-            completion(legacyError == nil
-                           ? [KKFIInspectorJSON
-                                 normalizedPayloadFromResponse:legacyResponse]
-                           : nil,
-                       legacyError);
-        }];
-    }];
-}
-
-- (void)finishHierarchyRequestID:(NSString *)requestID
-                      objectGroup:(NSString *)objectGroup
-                          snapshot:(KKFIHierarchySnapshot *)snapshot
-                             error:(NSError *)error {
-    if (![self.hierarchyRequestID isEqualToString:requestID]) {
+- (void)finishHierarchyRequest:(KKFIHierarchyRequest *)request
+                      snapshot:(KKFIHierarchySnapshot *)snapshot
+                         error:(NSError *)error {
+    if (self.hierarchyRequest != request) {
         return;
     }
 
-    self.hierarchyRequestID = nil;
-    self.pendingObjectGroup = nil;
+    self.hierarchyRequest = nil;
     NSArray<KKFIHierarchyCompletion> *waiters = self.hierarchyWaiters.copy;
     [self.hierarchyWaiters removeAllObjects];
 
@@ -462,6 +362,7 @@ typedef NS_ENUM(NSUInteger, KKFIInspectorSessionState) {
                description:@"The Flutter hierarchy could not be built."];
     }
 
+    NSString *objectGroup = request.objectGroup;
     if (snapshot != nil && error == nil) {
         NSString *oldObjectGroup = self.activeObjectGroup;
         self.activeObjectGroup = objectGroup;
@@ -680,8 +581,8 @@ typedef NS_ENUM(NSUInteger, KKFIInspectorSessionState) {
 - (void)abandonSnapshotStateWithError:(NSError *)error {
     self.activeObjectGroup = nil;
     self.activeSnapshotID = nil;
-    self.hierarchyRequestID = nil;
-    self.pendingObjectGroup = nil;
+    [self.hierarchyRequest cancel];
+    self.hierarchyRequest = nil;
     NSArray<KKFIHierarchyCompletion> *waiters = self.hierarchyWaiters.copy;
     [self.hierarchyWaiters removeAllObjects];
     for (KKFIHierarchyCompletion waiter in waiters) {
@@ -696,9 +597,10 @@ typedef NS_ENUM(NSUInteger, KKFIInspectorSessionState) {
     if (self.activeObjectGroup.length > 0) {
         [groups addObject:self.activeObjectGroup];
     }
-    if (self.pendingObjectGroup.length > 0 &&
-        ![groups containsObject:self.pendingObjectGroup]) {
-        [groups addObject:self.pendingObjectGroup];
+    NSString *pendingObjectGroup = self.hierarchyRequest.objectGroup;
+    if (pendingObjectGroup.length > 0 &&
+        ![groups containsObject:pendingObjectGroup]) {
+        [groups addObject:pendingObjectGroup];
     }
 
     self.serviceClient = nil;

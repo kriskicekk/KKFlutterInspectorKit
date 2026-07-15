@@ -13,6 +13,8 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
 + (KKFIHierarchySnapshot *)
     snapshotFromLayoutPayload:(NSDictionary *)layoutPayload
                 widgetPayload:(id)widgetPayload
+         widgetPropertiesByID:(NSDictionary<NSString *, NSArray *> *)widgetPropertiesByID
+          resolvedOffsetsByID:(NSDictionary<NSString *, NSValue *> *)resolvedOffsetsByID
                  rootObjectID:(NSString *)rootObjectID
              fallbackRootSize:(CGSize)fallbackRootSize
                     isolateID:(NSString *)isolateID
@@ -40,7 +42,16 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
     NSArray<KKFIInspectorElement *> *roots =
         [self elementsFromLayoutNode:layoutPayload
                         metadataByID:metadata
+                widgetPropertiesByID:widgetPropertiesByID
+                resolvedOffsetsByID:resolvedOffsetsByID
+            appliedRenderObjectOffsetIDs:[NSSet set]
                    accumulatedOffset:CGPointZero
+                        geometryScale:CGSizeMake(1.0, 1.0)
+             hasResolvedAncestorOffset:NO
+                       inferredOffset:CGPointZero
+                     hasInferredOffset:NO
+                    visualParentSize:CGSizeZero
+                  hasVisualParentSize:NO
                        forcedObjectID:rootObjectID
                            isolateID:isolateID
                          objectGroup:objectGroup
@@ -71,7 +82,16 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
 
 + (NSArray<KKFIInspectorElement *> *)elementsFromLayoutNode:(NSDictionary *)layoutNode
                                                metadataByID:(NSDictionary<NSString *, NSDictionary *> *)metadataByID
+                                       widgetPropertiesByID:(NSDictionary<NSString *, NSArray *> *)widgetPropertiesByID
+                                        resolvedOffsetsByID:(NSDictionary<NSString *, NSValue *> *)resolvedOffsetsByID
+                               appliedRenderObjectOffsetIDs:(NSSet<NSString *> *)appliedRenderObjectOffsetIDs
                                           accumulatedOffset:(CGPoint)accumulatedOffset
+                                               geometryScale:(CGSize)geometryScale
+                                hasResolvedAncestorOffset:(BOOL)hasResolvedAncestorOffset
+                                              inferredOffset:(CGPoint)inferredOffset
+                                            hasInferredOffset:(BOOL)hasInferredOffset
+                                           visualParentSize:(CGSize)visualParentSize
+                                         hasVisualParentSize:(BOOL)hasVisualParentSize
                                              forcedObjectID:(NSString *)forcedObjectID
                                                   isolateID:(NSString *)isolateID
                                                 objectGroup:(NSString *)objectGroup
@@ -81,21 +101,9 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
                                             layoutModifiers:(NSArray<NSDictionary *> *)layoutModifiers interactions:(NSArray<NSDictionary *> *)interactions
                                                   semantics:(NSArray<NSDictionary *> *)semantics
                                            fallbackRootSize:(CGSize)fallbackRootSize {
-    BOOL foundOffset = NO;
-    CGPoint localOffset = [self offsetFromNode:layoutNode found:&foundOffset];
-    CGPoint combinedOffset = CGPointMake(accumulatedOffset.x + localOffset.x,
-                                         accumulatedOffset.y + localOffset.y);
     NSString *objectID = [KKFIInspectorJSON nodeIDFromDictionary:layoutNode];
     if (objectID.length == 0) {
         objectID = forcedObjectID;
-    }
-
-    BOOL foundSize = NO;
-    CGSize size = [self sizeFromNode:layoutNode found:&foundSize];
-    if (!foundSize && forcedObjectID.length > 0 &&
-        fallbackRootSize.width > 0 && fallbackRootSize.height > 0) {
-        size = fallbackRootSize;
-        foundSize = YES;
     }
 
     NSDictionary *metadata = objectID.length > 0 ? metadataByID[objectID] : nil;
@@ -110,6 +118,65 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
         ? @"transparent"
         : [self hierarchyRoleForWidgetType:baseWidgetType
                           renderObjectType:renderObjectType];
+
+    NSString *renderObjectID = [self renderObjectIDFromNode:layoutNode];
+    BOOL renderObjectOffsetAlreadyApplied = renderObjectID.length > 0 &&
+        [appliedRenderObjectOffsetIDs containsObject:renderObjectID];
+    NSMutableSet<NSString *> *nextAppliedRenderObjectOffsetIDs =
+        [appliedRenderObjectOffsetIDs mutableCopy];
+
+    BOOL foundOffset = NO;
+    NSValue *resolvedOffsetValue = objectID.length > 0
+        ? resolvedOffsetsByID[objectID]
+        : nil;
+    CGPoint localOffset = CGPointZero;
+    if (renderObjectOffsetAlreadyApplied) {
+        // ParentDataWidget nodes such as LayoutId and their visible child can
+        // reference the exact same RenderObject. Its parentData offset belongs
+        // to that RenderObject and must only be applied once along the path.
+        foundOffset = YES;
+    } else if (resolvedOffsetValue != nil) {
+        localOffset = resolvedOffsetValue.CGPointValue;
+        foundOffset = YES;
+    } else {
+        NSDictionary *parentRenderElement =
+            [layoutNode[@"parentRenderElement"] isKindOfClass:NSDictionary.class]
+                ? layoutNode[@"parentRenderElement"]
+                : nil;
+        NSString *parentRenderObjectID =
+            [self renderObjectIDFromNode:parentRenderElement];
+        BOOL parentRenderObjectOffsetAlreadyApplied =
+            parentRenderObjectID.length > 0 &&
+            [appliedRenderObjectOffsetIDs containsObject:parentRenderObjectID];
+        localOffset = [self offsetFromNode:layoutNode
+              useParentRenderElementOffset:
+                  [hierarchyRole isEqualToString:@"visual"] &&
+                  !parentRenderObjectOffsetAlreadyApplied
+                                     found:&foundOffset];
+    }
+    if (!renderObjectOffsetAlreadyApplied && resolvedOffsetValue == nil &&
+        !foundOffset && hasInferredOffset) {
+        localOffset = inferredOffset;
+        foundOffset = YES;
+    }
+    if (foundOffset && !renderObjectOffsetAlreadyApplied &&
+        renderObjectID.length > 0) {
+        [nextAppliedRenderObjectOffsetIDs addObject:renderObjectID];
+    }
+    CGPoint combinedOffset = CGPointMake(
+        accumulatedOffset.x + localOffset.x * geometryScale.width,
+        accumulatedOffset.y + localOffset.y * geometryScale.height);
+
+    BOOL foundSize = NO;
+    CGSize size = [self sizeFromNode:layoutNode found:&foundSize];
+    if (!foundSize && forcedObjectID.length > 0 &&
+        fallbackRootSize.width > 0 && fallbackRootSize.height > 0) {
+        size = fallbackRootSize;
+        foundSize = YES;
+    }
+    CGSize displayedSize = CGSizeMake(size.width * geometryScale.width,
+                                      size.height * geometryScale.height);
+
     BOOL isSpacingContent = [baseWidgetType isEqualToString:@"SizedBox"] ||
         [baseWidgetType isEqualToString:@"Spacer"];
     // A spacing widget is intentional layout content even when one dimension
@@ -119,6 +186,18 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
     BOOL hasGeometry = objectID.length > 0 && foundSize &&
         (isSpacingContent || (size.width > 0 && size.height > 0));
     BOOL isVisual = hasGeometry && [hierarchyRole isEqualToString:@"visual"];
+    BOOL isRoot = forcedObjectID.length > 0;
+    BOOL fillsVisualParent = hasVisualParentSize && foundSize &&
+        fabs(size.width - visualParentSize.width) < 0.01 &&
+        fabs(size.height - visualParentSize.height) < 0.01 &&
+        fabs(accumulatedOffset.x) < 0.01 &&
+        fabs(accumulatedOffset.y) < 0.01;
+    BOOL inheritsResolvedAncestorOffset = !foundOffset &&
+        hasResolvedAncestorOffset &&
+        [self nodeMatchesParentRenderElementSize:layoutNode];
+    BOOL hasResolvedFrame = foundSize &&
+        (foundOffset || isRoot || fillsVisualParent ||
+         inheritsResolvedAncestorOffset);
 
     NSDictionary *relation = [self relationForLayoutNode:layoutNode
                                                       type:baseWidgetType
@@ -140,24 +219,69 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
     NSArray *childrenJSON = [layoutNode[@"children"] isKindOfClass:NSArray.class]
         ? layoutNode[@"children"]
         : @[];
+    NSArray<NSValue *> *inferredChildOffsets =
+        [self inferredOffsetsForNode:layoutNode
+                          widgetType:baseWidgetType
+                          properties:widgetPropertiesByID[objectID]
+                            children:childrenJSON];
     NSMutableArray<KKFIInspectorElement *> *children = [NSMutableArray array];
     NSMutableArray<NSDictionary *> *childLayouts = [NSMutableArray array];
     NSMutableArray<NSDictionary *> *nextChildrenLayouts =
         isVisual ? childLayouts : childrenLayoutsForVisualParent;
     CGPoint nextAccumulatedOffset = isVisual ? CGPointZero : combinedOffset;
+    CGSize nextGeometryScale = geometryScale;
+    CGPoint fittedChildOffset = CGPointZero;
+    CGSize fittedChildScale = CGSizeMake(1.0, 1.0);
+    BOOL appliesFittedBoxTransform = !isVisual && childrenJSON.count == 1 &&
+        [baseWidgetType isEqualToString:@"FittedBox"] &&
+        [childrenJSON.firstObject isKindOfClass:NSDictionary.class] &&
+        [self fittedBoxTransformFromNode:layoutNode
+                              childNode:childrenJSON.firstObject
+                                 offset:&fittedChildOffset
+                                  scale:&fittedChildScale];
+    if (appliesFittedBoxTransform) {
+        nextAccumulatedOffset = CGPointMake(
+            combinedOffset.x + fittedChildOffset.x * geometryScale.width,
+            combinedOffset.y + fittedChildOffset.y * geometryScale.height);
+        nextGeometryScale = CGSizeMake(
+            geometryScale.width * fittedChildScale.width,
+            geometryScale.height * fittedChildScale.height);
+    }
+    BOOL nextHasResolvedAncestorOffset = isVisual
+        ? NO
+        : (hasResolvedAncestorOffset || foundOffset);
     NSArray<NSDictionary *> *childLayoutModifiers =
         isVisual ? @[] : nextLayoutModifiers;
     NSArray<NSDictionary *> *childInteractions =
         isVisual ? @[] : nextInteractions;
     NSArray<NSDictionary *> *childSemantics = isVisual ? @[] : nextSemantics;
-    for (id value in childrenJSON) {
+    [childrenJSON enumerateObjectsUsingBlock:^(id value,
+                                                NSUInteger index,
+                                                BOOL *stop) {
         if (![value isKindOfClass:NSDictionary.class]) {
-            continue;
+            return;
+        }
+        NSValue *inferredChildOffset =
+            index < inferredChildOffsets.count ? inferredChildOffsets[index] : nil;
+        if (inferredChildOffset == nil && appliesFittedBoxTransform && index == 0) {
+            // RenderFittedBox positions its child through a paint transform,
+            // so the child normally has no BoxParentData offset. The transform
+            // above fully resolves its origin; zero is authoritative here.
+            inferredChildOffset = [NSValue valueWithCGPoint:CGPointZero];
         }
         [children addObjectsFromArray:
             [self elementsFromLayoutNode:value
                             metadataByID:metadataByID
+                    widgetPropertiesByID:widgetPropertiesByID
+                    resolvedOffsetsByID:resolvedOffsetsByID
+            appliedRenderObjectOffsetIDs:nextAppliedRenderObjectOffsetIDs
                        accumulatedOffset:nextAccumulatedOffset
+                            geometryScale:nextGeometryScale
+                 hasResolvedAncestorOffset:nextHasResolvedAncestorOffset
+                           inferredOffset:inferredChildOffset.CGPointValue
+                         hasInferredOffset:inferredChildOffset != nil
+                        visualParentSize:isVisual ? size : visualParentSize
+                      hasVisualParentSize:isVisual ? foundSize : hasVisualParentSize
                            forcedObjectID:nil
                                isolateID:isolateID
                               objectGroup:objectGroup
@@ -168,7 +292,7 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
                             interactions:childInteractions
                                 semantics:childSemantics
                         fallbackRootSize:CGSizeZero]];
-    }
+    }];
 
     if (!isVisual) {
         return children.copy;
@@ -186,7 +310,9 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
                                       renderObjectType:renderObjectType];
     NSDictionary *nativeDecoration =
         [self nativeDecorationFromLayoutNode:layoutNode
-                            renderObjectType:renderObjectType];
+                            renderObjectType:renderObjectType
+                                  widgetType:baseWidgetType
+                                  properties:widgetPropertiesByID[objectID]];
     NSString *textPreview =
         [metadata[@"textPreview"] isKindOfClass:NSString.class]
             ? metadata[@"textPreview"]
@@ -234,8 +360,8 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
           nativeDecoration:nativeDecoration
              capabilities:capabilities
                     frame:CGRectMake(combinedOffset.x, combinedOffset.y,
-                                     size.width, size.height)
-                 hasFrame:YES
+                                     displayedSize.width, displayedSize.height)
+                 hasFrame:hasResolvedFrame
                   rawJSON:layoutNode
            childrenLayouts:childLayouts
            layoutModifiers:nextLayoutModifiers
@@ -313,10 +439,11 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
         layoutModifiers = [NSSet setWithArray:@[
             @"Align", @"Center", @"Padding", @"SafeArea", @"Expanded",
             @"Flexible", @"Positioned", @"PositionedDirectional", @"FittedBox",
-            @"FractionallySizedBox", @"AspectRatio", @"ConstrainedBox",
-            @"UnconstrainedBox", @"LimitedBox", @"OverflowBox", @"Baseline",
-            @"IntrinsicWidth", @"IntrinsicHeight", @"SliverPadding",
-            @"SliverToBoxAdapter",
+            @"FractionallySizedBox", @"FractionalTranslation",
+            @"SlideTransition", @"AspectRatio", @"ConstrainedBox",
+            @"UnconstrainedBox", @"LimitedBox", @"OverflowBox",
+            @"Baseline", @"IntrinsicWidth", @"IntrinsicHeight",
+            @"SliverPadding", @"SliverToBoxAdapter", @"LayoutId",
         ]];
         spacingWidgets = [NSSet setWithArray:@[
             @"SizedBox", @"Spacer",
@@ -384,10 +511,11 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
             @"RawImage",
         ]];
         controlTypes = [NSSet setWithArray:@[
-            @"Checkbox", @"CupertinoButton", @"ElevatedButton",
-            @"FloatingActionButton", @"GestureDetector", @"IconButton",
-            @"InkWell", @"OutlinedButton", @"Radio", @"Slider", @"Switch",
-            @"TextButton",
+            @"Checkbox", @"CheckboxListTile", @"CupertinoButton",
+            @"ElevatedButton", @"FilledButton", @"FloatingActionButton",
+            @"GestureDetector", @"IconButton", @"InkWell",
+            @"OutlinedButton", @"Radio", @"Slider", @"Switch",
+            @"SwitchListTile", @"TextButton",
         ]];
     });
 
@@ -510,8 +638,9 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
             @"CustomPaint", @"Scaffold", @"Material", @"Card",
             @"PhysicalModel", @"ColoredBox", @"DecoratedBox", @"Checkbox",
             @"CupertinoButton", @"CupertinoNavigationBar", @"ElevatedButton",
-            @"FloatingActionButton", @"IconButton", @"OutlinedButton", @"Radio",
-            @"Slider", @"Switch", @"TextButton",
+            @"FilledButton", @"FloatingActionButton", @"IconButton",
+            @"OutlinedButton", @"Radio", @"Slider", @"Switch", @"TextButton",
+            @"CheckboxListTile", @"SwitchListTile",
         ]];
         effectWidgets = [NSSet setWithArray:@[
             @"Opacity", @"Transform", @"ClipOval", @"ClipPath", @"ClipRect",
@@ -608,7 +737,9 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
 }
 
 + (NSDictionary *)nativeDecorationFromLayoutNode:(NSDictionary *)layoutNode
-                                 renderObjectType:(NSString *)renderObjectType {
+                                 renderObjectType:(NSString *)renderObjectType
+                                       widgetType:(NSString *)widgetType
+                                       properties:(NSArray *)widgetProperties {
     NSDictionary *renderObject =
         [layoutNode[@"renderObject"] isKindOfClass:NSDictionary.class]
             ? layoutNode[@"renderObject"]
@@ -618,82 +749,154 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
             ? renderObject[@"properties"]
             : @[];
 
-    if ([renderObjectType isEqualToString:@"RenderDecoratedBox"]) {
-        NSDictionary *decoration =
-            [self diagnosticPropertyNamed:@"decoration" inProperties:properties];
-        NSArray *decorationProperties =
-            [decoration[@"properties"] isKindOfClass:NSArray.class]
-                ? decoration[@"properties"]
-                : @[];
-        if (decorationProperties.count == 0) {
-            return nil;
-        }
-
-        NSDictionary *image =
-            [self diagnosticPropertyNamed:@"image"
-                              inProperties:decorationProperties];
-        NSDictionary *gradient =
-            [self diagnosticPropertyNamed:@"gradient"
-                              inProperties:decorationProperties];
-        if ([self diagnosticPropertyHasValue:image] ||
-            [self diagnosticPropertyHasValue:gradient]) {
-            return nil;
-        }
-
-        NSMutableDictionary *result = [@{
-            @"kind" : @"boxDecoration",
-            @"shape" : @"rectangle",
-        } mutableCopy];
-        NSDictionary *color = [self colorDictionaryFromProperty:
-            [self diagnosticPropertyNamed:@"color"
-                              inProperties:decorationProperties]];
-        if (color != nil) {
-            result[@"backgroundColor"] = color;
-        }
-
+    static NSSet<NSString *> *materialButtonTypes;
+    static dispatch_once_t buttonTypesOnceToken;
+    dispatch_once(&buttonTypesOnceToken, ^{
+        materialButtonTypes = [NSSet setWithArray:@[
+            @"CupertinoButton", @"ElevatedButton", @"FilledButton",
+            @"FloatingActionButton", @"IconButton", @"OutlinedButton",
+            @"TextButton",
+        ]];
+    });
+    if ([materialButtonTypes containsObject:widgetType]) {
         NSString *shapeDescription = [self diagnosticDescription:
             [self diagnosticPropertyNamed:@"shape"
-                              inProperties:decorationProperties]];
-        if ([shapeDescription containsString:@"circle"]) {
-            result[@"shape"] = @"circle";
+                              inProperties:widgetProperties]];
+        if (shapeDescription.length == 0) {
+            return nil;
         }
 
-        NSDictionary *radiusProperty =
-            [self diagnosticPropertyNamed:@"borderRadius"
-                              inProperties:decorationProperties];
-        if ([self diagnosticPropertyHasValue:radiusProperty]) {
-            NSNumber *radius = [self uniformRadiusFromDescription:
-                [self diagnosticDescription:radiusProperty]];
+        NSDictionary *color = [self colorDictionaryFromProperty:
+            [self diagnosticPropertyNamed:@"color"
+                              inProperties:widgetProperties]];
+        NSMutableDictionary *result = [@{
+            @"kind" : @"materialButton",
+            @"shape" : @"rectangle",
+            @"backgroundColor" : color ?: @{
+                @"red" : @0, @"green" : @0, @"blue" : @0, @"alpha" : @0,
+            },
+        } mutableCopy];
+        if ([shapeDescription containsString:@"CircleBorder"]) {
+            result[@"shape"] = @"circle";
+        } else if ([shapeDescription containsString:@"StadiumBorder"]) {
+            BOOL foundSize = NO;
+            CGSize size = [self sizeFromNode:layoutNode found:&foundSize];
+            if (!foundSize || size.width <= 0 || size.height <= 0) {
+                return nil;
+            }
+            result[@"cornerRadius"] = @(MIN(size.width, size.height) * 0.5);
+        } else {
+            NSNumber *radius =
+                [self uniformRadiusFromDescription:shapeDescription];
             if (radius == nil) {
                 return nil;
             }
             result[@"cornerRadius"] = radius;
         }
 
-        NSDictionary *borderProperty =
-            [self diagnosticPropertyNamed:@"border"
-                              inProperties:decorationProperties];
-        if ([self diagnosticPropertyHasValue:borderProperty]) {
-            NSDictionary *border = [self borderDictionaryFromDescription:
-                [self diagnosticDescription:borderProperty]];
-            if (border == nil) {
-                return nil;
-            }
+        NSDictionary *border =
+            [self borderDictionaryFromDescription:shapeDescription];
+        if ([border[@"width"] doubleValue] > 0) {
             result[@"border"] = border;
         }
+        NSNumber *elevation = [self numberFromDiagnosticProperty:
+            [self diagnosticPropertyNamed:@"elevation"
+                              inProperties:widgetProperties]];
+        if (elevation.doubleValue > 0) {
+            NSDictionary *shadowColor = [self colorDictionaryFromProperty:
+                [self diagnosticPropertyNamed:@"shadowColor"
+                                  inProperties:widgetProperties]];
+            if (shadowColor != nil) {
+                result[@"shadows"] = @[@{
+                    @"color" : shadowColor,
+                    @"offsetX" : @0,
+                    @"offsetY" : @(MAX(0.5, elevation.doubleValue * 0.5)),
+                    @"blurRadius" : @(MAX(1.0, elevation.doubleValue * 2.0)),
+                }];
+            }
+        }
+        return result.copy;
+    }
 
-        NSDictionary *shadowProperty =
-            [self diagnosticPropertyNamed:@"boxShadow"
-                              inProperties:decorationProperties];
-        if ([self diagnosticPropertyHasValue:shadowProperty]) {
-            NSArray *shadows =
-                [self shadowDictionariesFromProperty:shadowProperty];
-            if (shadows == nil) {
+    if ([widgetType isEqualToString:@"Container"]) {
+        NSDictionary *decoration =
+            [self diagnosticPropertyNamed:@"bg"
+                              inProperties:widgetProperties];
+        NSDictionary *result =
+            [self boxDecorationFromDiagnosticProperty:decoration];
+        if (result != nil) {
+            return result;
+        }
+    }
+
+    if ([widgetType isEqualToString:@"Card"]) {
+        NSDictionary *color = [self colorDictionaryFromProperty:
+            [self diagnosticPropertyNamed:@"color"
+                              inProperties:widgetProperties]];
+        NSString *shapeDescription = [self diagnosticDescription:
+            [self diagnosticPropertyNamed:@"shape"
+                              inProperties:widgetProperties]];
+        if (color == nil || shapeDescription.length == 0) {
+            return nil;
+        }
+
+        NSMutableDictionary *result = [@{
+            @"kind" : @"materialCard",
+            @"shape" : @"rectangle",
+            @"backgroundColor" : color,
+        } mutableCopy];
+        if ([shapeDescription containsString:@"CircleBorder"]) {
+            result[@"shape"] = @"circle";
+        } else {
+            NSNumber *radius =
+                [self uniformRadiusFromDescription:shapeDescription];
+            if (radius == nil) {
                 return nil;
             }
-            result[@"shadows"] = shadows;
+            result[@"cornerRadius"] = radius;
         }
-        return result.count > 2 ? result.copy : nil;
+
+        UIEdgeInsets margin = UIEdgeInsetsZero;
+        if ([self edgeInsetsFromDiagnosticProperty:
+                [self diagnosticPropertyNamed:@"margin"
+                                  inProperties:widgetProperties]
+                                          value:&margin]) {
+            result[@"contentInsets"] = @{
+                @"top" : @(margin.top),
+                @"left" : @(margin.left),
+                @"bottom" : @(margin.bottom),
+                @"right" : @(margin.right),
+            };
+        }
+
+        NSNumber *elevation = [self numberFromDiagnosticProperty:
+            [self diagnosticPropertyNamed:@"elevation"
+                              inProperties:widgetProperties]];
+        if (elevation.doubleValue > 0) {
+            result[@"elevation"] = elevation;
+            NSDictionary *shadowColor = [self colorDictionaryFromProperty:
+                [self diagnosticPropertyNamed:@"shadowColor"
+                                  inProperties:widgetProperties]];
+            if (shadowColor != nil) {
+                NSMutableDictionary *softShadowColor = shadowColor.mutableCopy;
+                softShadowColor[@"alpha"] =
+                    @(MIN([shadowColor[@"alpha"] doubleValue], 64.0));
+                result[@"shadowColor"] = shadowColor;
+                result[@"shadows"] = @[@{
+                    @"color" : softShadowColor.copy,
+                    @"offsetX" : @0,
+                    @"offsetY" : @(MAX(0.5, elevation.doubleValue * 0.5)),
+                    @"blurRadius" : @(MAX(1.0, elevation.doubleValue * 2.0)),
+                }];
+            }
+        }
+        return result.copy;
+    }
+
+    if ([renderObjectType isEqualToString:@"RenderDecoratedBox"]) {
+        NSDictionary *decoration =
+            [self diagnosticPropertyNamed:@"decoration" inProperties:properties];
+        return [self boxDecorationFromDiagnosticProperty:decoration];
     }
 
     if ([renderObjectType isEqualToString:@"_RenderColoredBox"]) {
@@ -748,6 +951,228 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
         return result.copy;
     }
     return nil;
+}
+
++ (NSDictionary *)boxDecorationFromDiagnosticProperty:(NSDictionary *)decoration {
+    NSArray *properties =
+        [decoration[@"properties"] isKindOfClass:NSArray.class]
+            ? decoration[@"properties"]
+            : @[];
+    if (properties.count == 0) {
+        return nil;
+    }
+
+    NSDictionary *image =
+        [self diagnosticPropertyNamed:@"image" inProperties:properties];
+    if ([self diagnosticPropertyHasValue:image]) {
+        return nil;
+    }
+
+    NSMutableDictionary *result = [@{
+        @"kind" : @"boxDecoration",
+        @"shape" : @"rectangle",
+    } mutableCopy];
+    NSDictionary *color = [self colorDictionaryFromProperty:
+        [self diagnosticPropertyNamed:@"color" inProperties:properties]];
+    if (color != nil) {
+        result[@"backgroundColor"] = color;
+    }
+
+    NSDictionary *gradientProperty =
+        [self diagnosticPropertyNamed:@"gradient" inProperties:properties];
+    if ([self diagnosticPropertyHasValue:gradientProperty]) {
+        NSDictionary *gradient =
+            [self linearGradientFromDiagnosticProperty:gradientProperty];
+        if (gradient == nil) {
+            return nil;
+        }
+        result[@"gradient"] = gradient;
+    }
+
+    NSString *shapeDescription = [self diagnosticDescription:
+        [self diagnosticPropertyNamed:@"shape" inProperties:properties]];
+    if ([shapeDescription containsString:@"circle"]) {
+        result[@"shape"] = @"circle";
+    }
+
+    NSDictionary *radiusProperty =
+        [self diagnosticPropertyNamed:@"borderRadius" inProperties:properties];
+    if ([self diagnosticPropertyHasValue:radiusProperty]) {
+        NSNumber *radius = [self uniformRadiusFromDescription:
+            [self diagnosticDescription:radiusProperty]];
+        if (radius == nil) {
+            return nil;
+        }
+        result[@"cornerRadius"] = radius;
+    }
+
+    NSDictionary *borderProperty =
+        [self diagnosticPropertyNamed:@"border" inProperties:properties];
+    if ([self diagnosticPropertyHasValue:borderProperty]) {
+        NSDictionary *border = [self borderDictionaryFromDescription:
+            [self diagnosticDescription:borderProperty]];
+        if (border == nil) {
+            return nil;
+        }
+        result[@"border"] = border;
+    }
+
+    NSDictionary *shadowProperty =
+        [self diagnosticPropertyNamed:@"boxShadow" inProperties:properties];
+    if ([self diagnosticPropertyHasValue:shadowProperty]) {
+        NSArray *shadows = [self shadowDictionariesFromProperty:shadowProperty];
+        if (shadows == nil) {
+            return nil;
+        }
+        result[@"shadows"] = shadows;
+    }
+    return result.count > 2 ? result.copy : nil;
+}
+
++ (NSDictionary *)linearGradientFromDiagnosticProperty:(NSDictionary *)property {
+    NSString *description = [self diagnosticDescription:property];
+    if (![description containsString:@"LinearGradient("] ||
+        ([description containsString:@"tileMode:"] &&
+         ![description containsString:@"tileMode: TileMode.clamp"]) ||
+        [description containsString:@"transform:"]) {
+        return nil;
+    }
+
+    NSRegularExpression *colorRegex = [NSRegularExpression
+        regularExpressionWithPattern:@"Color\\([^\\)]*\\)"
+                             options:0
+                               error:nil];
+    NSArray<NSTextCheckingResult *> *colorMatches =
+        [colorRegex matchesInString:description
+                           options:0
+                             range:NSMakeRange(0, description.length)];
+    NSMutableArray<NSDictionary *> *colors = [NSMutableArray array];
+    for (NSTextCheckingResult *match in colorMatches) {
+        NSDictionary *color = [self colorDictionaryFromDescription:
+            [description substringWithRange:match.range]];
+        if (color != nil) {
+            [colors addObject:color];
+        }
+    }
+    if (colors.count < 2) {
+        return nil;
+    }
+
+    NSString *beginDescription = @"Alignment.centerLeft";
+    NSString *endDescription = @"Alignment.centerRight";
+    NSRange beginMarker = [description rangeOfString:@"begin:"];
+    NSRange endMarker = [description rangeOfString:@", end:"];
+    NSRange colorsMarker = [description rangeOfString:@", colors:"];
+    if (beginMarker.location != NSNotFound &&
+        endMarker.location != NSNotFound &&
+        endMarker.location > NSMaxRange(beginMarker)) {
+        NSRange range = NSMakeRange(
+            NSMaxRange(beginMarker),
+            endMarker.location - NSMaxRange(beginMarker));
+        beginDescription =
+            [[description substringWithRange:range]
+                stringByTrimmingCharactersInSet:
+                    NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    }
+    if (endMarker.location != NSNotFound &&
+        colorsMarker.location != NSNotFound &&
+        colorsMarker.location > NSMaxRange(endMarker)) {
+        NSRange range = NSMakeRange(
+            NSMaxRange(endMarker),
+            colorsMarker.location - NSMaxRange(endMarker));
+        endDescription =
+            [[description substringWithRange:range]
+                stringByTrimmingCharactersInSet:
+                    NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    }
+
+    NSDictionary *startPoint =
+        [self unitPointFromAlignmentDescription:beginDescription];
+    NSDictionary *endPoint =
+        [self unitPointFromAlignmentDescription:endDescription];
+    if (startPoint == nil || endPoint == nil) {
+        return nil;
+    }
+
+    NSMutableDictionary *result = [@{
+        @"type" : @"linear",
+        @"colors" : colors.copy,
+        @"startX" : startPoint[@"x"],
+        @"startY" : startPoint[@"y"],
+        @"endX" : endPoint[@"x"],
+        @"endY" : endPoint[@"y"],
+    } mutableCopy];
+
+    NSRegularExpression *stopsRegex = [NSRegularExpression
+        regularExpressionWithPattern:@"stops:\\s*\\[([^\\]]+)\\]"
+                             options:0
+                               error:nil];
+    NSTextCheckingResult *stopsMatch =
+        [stopsRegex firstMatchInString:description
+                               options:0
+                                 range:NSMakeRange(0, description.length)];
+    if (stopsMatch.numberOfRanges == 2) {
+        NSString *stopsText =
+            [description substringWithRange:[stopsMatch rangeAtIndex:1]];
+        NSMutableArray<NSNumber *> *stops = [NSMutableArray array];
+        for (NSString *component in
+             [stopsText componentsSeparatedByString:@","]) {
+            NSString *trimmed =
+                [component stringByTrimmingCharactersInSet:
+                    NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            NSNumber *number = [KKFIInspectorJSON numberFromValue:trimmed];
+            if (number != nil) {
+                [stops addObject:number];
+            }
+        }
+        if (stops.count == colors.count) {
+            result[@"stops"] = stops.copy;
+        }
+    }
+    return result.copy;
+}
+
++ (NSDictionary *)unitPointFromAlignmentDescription:(NSString *)description {
+    static NSDictionary<NSString *, NSDictionary *> *namedPoints;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        namedPoints = @{
+            @"Alignment.topLeft" : @{ @"x" : @0, @"y" : @0 },
+            @"Alignment.topCenter" : @{ @"x" : @0.5, @"y" : @0 },
+            @"Alignment.topRight" : @{ @"x" : @1, @"y" : @0 },
+            @"Alignment.centerLeft" : @{ @"x" : @0, @"y" : @0.5 },
+            @"Alignment.center" : @{ @"x" : @0.5, @"y" : @0.5 },
+            @"Alignment.centerRight" : @{ @"x" : @1, @"y" : @0.5 },
+            @"Alignment.bottomLeft" : @{ @"x" : @0, @"y" : @1 },
+            @"Alignment.bottomCenter" : @{ @"x" : @0.5, @"y" : @1 },
+            @"Alignment.bottomRight" : @{ @"x" : @1, @"y" : @1 },
+        };
+    });
+    NSDictionary *namedPoint = namedPoints[description];
+    if (namedPoint != nil) {
+        return namedPoint;
+    }
+
+    NSRegularExpression *regex = [NSRegularExpression
+        regularExpressionWithPattern:
+            @"Alignment\\(\\s*([-+0-9.eE]+)\\s*,\\s*([-+0-9.eE]+)\\s*\\)"
+                             options:0
+                               error:nil];
+    NSTextCheckingResult *match =
+        [regex firstMatchInString:description
+                          options:0
+                            range:NSMakeRange(0, description.length)];
+    if (match.numberOfRanges != 3) {
+        return nil;
+    }
+    CGFloat x = [[description substringWithRange:[match rangeAtIndex:1]]
+        doubleValue];
+    CGFloat y = [[description substringWithRange:[match rangeAtIndex:2]]
+        doubleValue];
+    return @{
+        @"x" : @(MIN(MAX((x + 1.0) / 2.0, 0.0), 1.0)),
+        @"y" : @(MIN(MAX((y + 1.0) / 2.0, 0.0), 1.0)),
+    };
 }
 
 + (NSDictionary *)diagnosticPropertyNamed:(NSString *)name
@@ -894,7 +1319,8 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
         [description containsString:@"BorderStyle.none"]) {
         return @{ @"width" : @0 };
     }
-    if (![description containsString:@"Border.all("]) {
+    if (![description containsString:@"Border.all("] &&
+        ![description containsString:@"BorderSide("]) {
         return nil;
     }
     NSDictionary *color = [self colorDictionaryFromDescription:description];
@@ -1001,7 +1427,372 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
                    : CGSizeZero;
 }
 
-+ (CGPoint)offsetFromNode:(NSDictionary *)node found:(BOOL *)found {
++ (BOOL)fittedBoxTransformFromNode:(NSDictionary *)node
+                         childNode:(NSDictionary *)childNode
+                            offset:(CGPoint *)offset
+                             scale:(CGSize *)scale {
+    BOOL foundBoxSize = NO;
+    BOOL foundChildSize = NO;
+    CGSize boxSize = [self sizeFromNode:node found:&foundBoxSize];
+    CGSize childSize = [self sizeFromNode:childNode found:&foundChildSize];
+    if (!foundBoxSize || !foundChildSize || boxSize.width <= 0 ||
+        boxSize.height <= 0 || childSize.width <= 0 || childSize.height <= 0) {
+        return NO;
+    }
+
+    NSDictionary *renderObject =
+        [node[@"renderObject"] isKindOfClass:NSDictionary.class]
+            ? node[@"renderObject"]
+            : nil;
+    NSArray *properties =
+        [renderObject[@"properties"] isKindOfClass:NSArray.class]
+            ? renderObject[@"properties"]
+            : @[];
+    NSString *fit = [self diagnosticDescription:
+        [self diagnosticPropertyNamed:@"fit" inProperties:properties]];
+    if ([fit hasPrefix:@"BoxFit."]) {
+        fit = [fit substringFromIndex:@"BoxFit.".length];
+    }
+
+    CGFloat scaleX = 1.0;
+    CGFloat scaleY = 1.0;
+    CGFloat widthScale = boxSize.width / childSize.width;
+    CGFloat heightScale = boxSize.height / childSize.height;
+    if ([fit isEqualToString:@"fill"]) {
+        scaleX = widthScale;
+        scaleY = heightScale;
+    } else if ([fit isEqualToString:@"contain"]) {
+        scaleX = scaleY = MIN(widthScale, heightScale);
+    } else if ([fit isEqualToString:@"cover"]) {
+        scaleX = scaleY = MAX(widthScale, heightScale);
+    } else if ([fit isEqualToString:@"fitWidth"]) {
+        scaleX = scaleY = widthScale;
+    } else if ([fit isEqualToString:@"fitHeight"]) {
+        scaleX = scaleY = heightScale;
+    } else if ([fit isEqualToString:@"none"]) {
+        scaleX = scaleY = 1.0;
+    } else if ([fit isEqualToString:@"scaleDown"]) {
+        scaleX = scaleY = MIN(1.0, MIN(widthScale, heightScale));
+    } else {
+        return NO;
+    }
+
+    NSString *alignmentDescription = [self diagnosticDescription:
+        [self diagnosticPropertyNamed:@"alignment" inProperties:properties]];
+    NSDictionary *alignment =
+        [self unitPointFromAlignmentDescription:alignmentDescription];
+    NSNumber *alignmentX = alignment[@"x"];
+    NSNumber *alignmentY = alignment[@"y"];
+    if (alignmentX == nil || alignmentY == nil || !isfinite(scaleX) ||
+        !isfinite(scaleY) || scaleX <= 0 || scaleY <= 0) {
+        return NO;
+    }
+
+    CGSize transformedSize = CGSizeMake(childSize.width * scaleX,
+                                        childSize.height * scaleY);
+    if (offset != NULL) {
+        *offset = CGPointMake(
+            (boxSize.width - transformedSize.width) * alignmentX.doubleValue,
+            (boxSize.height - transformedSize.height) * alignmentY.doubleValue);
+    }
+    if (scale != NULL) {
+        *scale = CGSizeMake(scaleX, scaleY);
+    }
+    return YES;
+}
+
++ (NSArray<NSValue *> *)inferredOffsetsForNode:(NSDictionary *)node
+                                    widgetType:(NSString *)widgetType
+                                    properties:(NSArray *)properties
+                                      children:(NSArray *)children {
+    if ([widgetType isEqualToString:@"ListView"]) {
+        return [self inferredOffsetsForLinearListNode:node
+                                           properties:properties
+                                             children:children];
+    }
+    if ([widgetType isEqualToString:@"Card"]) {
+        return [self inferredOffsetsForCardNode:node
+                                     properties:properties
+                                       children:children];
+    }
+    if ([widgetType isEqualToString:@"SliverToBoxAdapter"] &&
+        children.count == 1) {
+        // RenderSliverToBoxAdapter positions its box child at the sliver's
+        // local origin. The summary tree omits the internal RenderBox bridge,
+        // so make that zero offset explicit after the sliver paintOffset has
+        // been resolved by the session.
+        return @[[NSValue valueWithCGPoint:CGPointZero]];
+    }
+    return nil;
+}
+
++ (NSArray<NSValue *> *)inferredOffsetsForLinearListNode:(NSDictionary *)node
+                                               properties:(NSArray *)properties
+                                                 children:(NSArray *)children {
+    // Layout Explorer does not serialize SliverLogicalParentData.layoutOffset.
+    // Recover offsets only when the ListView cannot scroll: in that case its
+    // leading padding plus the measured child extents fully determines every
+    // child's position. Scrollable, reversed, horizontal, and unknown layouts
+    // deliberately return no inference rather than inventing a frame.
+    if (properties.count == 0 || children.count == 0) {
+        return nil;
+    }
+
+    NSDictionary *axisProperty =
+        [self diagnosticPropertyNamed:@"scrollDirection"
+                          inProperties:properties];
+    if (![[self diagnosticDescription:axisProperty] isEqualToString:@"vertical"]) {
+        return nil;
+    }
+
+    BOOL reverseFound = NO;
+    BOOL reverse = [self boolFromDiagnosticProperty:
+        [self diagnosticPropertyNamed:@"reverse" inProperties:properties]
+                                           found:&reverseFound];
+    BOOL shrinkWrapFound = NO;
+    BOOL shrinkWrap = [self boolFromDiagnosticProperty:
+        [self diagnosticPropertyNamed:@"shrinkWrap" inProperties:properties]
+                                              found:&shrinkWrapFound];
+    if (!reverseFound || reverse || !shrinkWrapFound || shrinkWrap) {
+        return nil;
+    }
+
+    UIEdgeInsets padding = UIEdgeInsetsZero;
+    if (![self edgeInsetsFromDiagnosticProperty:
+            [self diagnosticPropertyNamed:@"padding" inProperties:properties]
+                                      value:&padding]) {
+        return nil;
+    }
+
+    BOOL foundViewportSize = NO;
+    CGSize viewportSize = [self sizeFromNode:node found:&foundViewportSize];
+    if (!foundViewportSize || viewportSize.width <= 0 ||
+        viewportSize.height <= 0) {
+        return nil;
+    }
+
+    const CGFloat tolerance = 0.5;
+    CGFloat expectedChildWidth =
+        viewportSize.width - padding.left - padding.right;
+    if (expectedChildWidth < -tolerance) {
+        return nil;
+    }
+
+    CGFloat contentHeight = padding.top + padding.bottom;
+    NSMutableArray<NSValue *> *offsets =
+        [NSMutableArray arrayWithCapacity:children.count];
+    CGFloat childY = padding.top;
+    for (id value in children) {
+        if (![value isKindOfClass:NSDictionary.class]) {
+            return nil;
+        }
+        BOOL foundChildSize = NO;
+        CGSize childSize = [self sizeFromNode:value found:&foundChildSize];
+        if (!foundChildSize || !isfinite(childSize.width) ||
+            !isfinite(childSize.height) || childSize.width < 0 ||
+            childSize.height < 0 ||
+            fabs(childSize.width - expectedChildWidth) > tolerance) {
+            return nil;
+        }
+        [offsets addObject:[NSValue valueWithCGPoint:
+            CGPointMake(padding.left, childY)]];
+        childY += childSize.height;
+        contentHeight += childSize.height;
+    }
+
+    if (contentHeight > viewportSize.height + tolerance) {
+        return nil;
+    }
+    return offsets.copy;
+}
+
++ (NSArray<NSValue *> *)inferredOffsetsForCardNode:(NSDictionary *)node
+                                         properties:(NSArray *)properties
+                                           children:(NSArray *)children {
+    // A Card's margin belongs to the outer widget. The summary tree promotes
+    // the Card child and omits the intermediate padding RenderObjects, so use
+    // the declared margin only when it exactly explains the measured size
+    // difference. Otherwise leave the child frame unresolved.
+    if (properties.count == 0 || children.count != 1 ||
+        ![children.firstObject isKindOfClass:NSDictionary.class]) {
+        return nil;
+    }
+
+    UIEdgeInsets margin = UIEdgeInsetsZero;
+    if (![self edgeInsetsFromDiagnosticProperty:
+            [self diagnosticPropertyNamed:@"margin" inProperties:properties]
+                                      value:&margin]) {
+        return nil;
+    }
+
+    BOOL foundCardSize = NO;
+    BOOL foundChildSize = NO;
+    CGSize cardSize = [self sizeFromNode:node found:&foundCardSize];
+    CGSize childSize = [self sizeFromNode:children.firstObject
+                                    found:&foundChildSize];
+    const CGFloat tolerance = 0.5;
+    CGFloat expectedWidth = cardSize.width - margin.left - margin.right;
+    CGFloat expectedHeight = cardSize.height - margin.top - margin.bottom;
+    if (!foundCardSize || !foundChildSize || expectedWidth < -tolerance ||
+        expectedHeight < -tolerance ||
+        fabs(childSize.width - expectedWidth) > tolerance ||
+        fabs(childSize.height - expectedHeight) > tolerance) {
+        return nil;
+    }
+
+    return @[[NSValue valueWithCGPoint:
+        CGPointMake(margin.left, margin.top)]];
+}
+
++ (BOOL)boolFromDiagnosticProperty:(NSDictionary *)property
+                              found:(BOOL *)found {
+    id value = property[@"value"];
+    if ([value isKindOfClass:NSNumber.class]) {
+        if (found != NULL) {
+            *found = YES;
+        }
+        return [value boolValue];
+    }
+
+    NSString *description = [self diagnosticDescription:property];
+    if ([description isEqualToString:@"true"] ||
+        [description isEqualToString:@"false"]) {
+        if (found != NULL) {
+            *found = YES;
+        }
+        return [description isEqualToString:@"true"];
+    }
+
+    if (found != NULL) {
+        *found = NO;
+    }
+    return NO;
+}
+
++ (BOOL)edgeInsetsFromDiagnosticProperty:(NSDictionary *)property
+                                    value:(UIEdgeInsets *)value {
+    if (property == nil || value == NULL) {
+        return NO;
+    }
+
+    NSString *description = [self diagnosticDescription:property];
+    if ([description isEqualToString:@"null"] ||
+        [description containsString:@"EdgeInsets.zero"]) {
+        *value = UIEdgeInsetsZero;
+        return YES;
+    }
+
+    NSRegularExpression *allRegex = [NSRegularExpression
+        regularExpressionWithPattern:
+            @"EdgeInsets\\.all\\(\\s*([-+0-9.eE]+)\\s*\\)"
+                             options:0
+                               error:nil];
+    NSTextCheckingResult *match =
+        [allRegex firstMatchInString:description
+                             options:0
+                               range:NSMakeRange(0, description.length)];
+    if (match.numberOfRanges == 2) {
+        CGFloat inset = [[description substringWithRange:
+            [match rangeAtIndex:1]] doubleValue];
+        *value = UIEdgeInsetsMake(inset, inset, inset, inset);
+        return YES;
+    }
+
+    NSRegularExpression *valuesRegex = [NSRegularExpression
+        regularExpressionWithPattern:
+            @"EdgeInsets(?:\\.fromLTRB)?\\(\\s*([-+0-9.eE]+)\\s*,\\s*"
+             @"([-+0-9.eE]+)\\s*,\\s*([-+0-9.eE]+)\\s*,\\s*"
+             @"([-+0-9.eE]+)\\s*\\)"
+                             options:0
+                               error:nil];
+    match = [valuesRegex firstMatchInString:description
+                                    options:0
+                                      range:NSMakeRange(0, description.length)];
+    if (match.numberOfRanges == 5) {
+        CGFloat left = [[description substringWithRange:
+            [match rangeAtIndex:1]] doubleValue];
+        CGFloat top = [[description substringWithRange:
+            [match rangeAtIndex:2]] doubleValue];
+        CGFloat right = [[description substringWithRange:
+            [match rangeAtIndex:3]] doubleValue];
+        CGFloat bottom = [[description substringWithRange:
+            [match rangeAtIndex:4]] doubleValue];
+        *value = UIEdgeInsetsMake(top, left, bottom, right);
+        return YES;
+    }
+
+    if ([description containsString:@"EdgeInsets.symmetric("]) {
+        CGFloat horizontal = 0;
+        CGFloat vertical = 0;
+        NSRegularExpression *horizontalRegex = [NSRegularExpression
+            regularExpressionWithPattern:@"horizontal:\\s*([-+0-9.eE]+)"
+                                 options:0
+                                   error:nil];
+        NSRegularExpression *verticalRegex = [NSRegularExpression
+            regularExpressionWithPattern:@"vertical:\\s*([-+0-9.eE]+)"
+                                 options:0
+                                   error:nil];
+        NSTextCheckingResult *horizontalMatch =
+            [horizontalRegex firstMatchInString:description
+                                         options:0
+                                           range:NSMakeRange(0, description.length)];
+        NSTextCheckingResult *verticalMatch =
+            [verticalRegex firstMatchInString:description
+                                       options:0
+                                         range:NSMakeRange(0, description.length)];
+        if (horizontalMatch.numberOfRanges == 2) {
+            horizontal = [[description substringWithRange:
+                [horizontalMatch rangeAtIndex:1]] doubleValue];
+        }
+        if (verticalMatch.numberOfRanges == 2) {
+            vertical = [[description substringWithRange:
+                [verticalMatch rangeAtIndex:1]] doubleValue];
+        }
+        *value = UIEdgeInsetsMake(vertical, horizontal, vertical, horizontal);
+        return YES;
+    }
+
+    if ([description containsString:@"EdgeInsets.only("]) {
+        CGFloat left = 0;
+        CGFloat top = 0;
+        CGFloat right = 0;
+        CGFloat bottom = 0;
+        BOOL matchedEdge = NO;
+        for (NSString *edge in @[@"left", @"top", @"right", @"bottom"]) {
+            NSString *pattern = [NSString stringWithFormat:
+                @"%@:\\s*([-+0-9.eE]+)", edge];
+            NSRegularExpression *regex = [NSRegularExpression
+                regularExpressionWithPattern:pattern options:0 error:nil];
+            NSTextCheckingResult *edgeMatch =
+                [regex firstMatchInString:description
+                                  options:0
+                                    range:NSMakeRange(0, description.length)];
+            if (edgeMatch.numberOfRanges != 2) {
+                continue;
+            }
+            CGFloat inset = [[description substringWithRange:
+                [edgeMatch rangeAtIndex:1]] doubleValue];
+            matchedEdge = YES;
+            if ([edge isEqualToString:@"left"]) {
+                left = inset;
+            } else if ([edge isEqualToString:@"top"]) {
+                top = inset;
+            } else if ([edge isEqualToString:@"right"]) {
+                right = inset;
+            } else {
+                bottom = inset;
+            }
+        }
+        if (matchedEdge) {
+            *value = UIEdgeInsetsMake(top, left, bottom, right);
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
++ (CGPoint)directOffsetFromNode:(NSDictionary *)node found:(BOOL *)found {
     NSDictionary *parentData =
         [node[@"parentData"] isKindOfClass:NSDictionary.class]
             ? node[@"parentData"]
@@ -1044,6 +1835,76 @@ static NSString *const KKFIInspectorTreeBuilderErrorDomain =
         *found = NO;
     }
     return CGPointZero;
+}
+
++ (CGPoint)offsetFromNode:(NSDictionary *)node
+    useParentRenderElementOffset:(BOOL)useParentRenderElementOffset
+                           found:(BOOL *)found {
+    BOOL foundDirectOffset = NO;
+    CGPoint directOffset =
+        [self directOffsetFromNode:node found:&foundDirectOffset];
+    if (foundDirectOffset) {
+        if (found != NULL) {
+            *found = YES;
+        }
+        return directOffset;
+    }
+
+    // Some high-level widgets expose a semantic RenderObject whose parentData
+    // is intentionally empty. Their actual placement in the outer layout is
+    // carried by parentRenderElement instead. AppBar is a common example: its
+    // RenderSemanticsAnnotations has no offset, while the Scaffold slot's
+    // ConstrainedBox contains offset=(0, 0). Reuse that offset only when both
+    // nodes have the same measured size, so a structurally related but
+    // geometrically different ancestor cannot move this element incorrectly.
+    NSDictionary *parentRenderElement =
+        [node[@"parentRenderElement"] isKindOfClass:NSDictionary.class]
+            ? node[@"parentRenderElement"]
+            : nil;
+    if (useParentRenderElementOffset &&
+        [self nodeMatchesParentRenderElementSize:node]) {
+        BOOL foundCarrierOffset = NO;
+        CGPoint carrierOffset =
+            [self directOffsetFromNode:parentRenderElement
+                                 found:&foundCarrierOffset];
+        if (foundCarrierOffset) {
+            if (found != NULL) {
+                *found = YES;
+            }
+            return carrierOffset;
+        }
+    }
+
+    if (found != NULL) {
+        *found = NO;
+    }
+    return CGPointZero;
+}
+
++ (NSString *)renderObjectIDFromNode:(NSDictionary *)node {
+    NSDictionary *renderObject =
+        [node[@"renderObject"] isKindOfClass:NSDictionary.class]
+            ? node[@"renderObject"]
+            : nil;
+    return [renderObject[@"valueId"] isKindOfClass:NSString.class]
+        ? renderObject[@"valueId"]
+        : nil;
+}
+
++ (BOOL)nodeMatchesParentRenderElementSize:(NSDictionary *)node {
+    NSDictionary *parentRenderElement =
+        [node[@"parentRenderElement"] isKindOfClass:NSDictionary.class]
+            ? node[@"parentRenderElement"]
+            : nil;
+    BOOL foundNodeSize = NO;
+    BOOL foundParentSize = NO;
+    CGSize nodeSize = [self sizeFromNode:node found:&foundNodeSize];
+    CGSize parentSize =
+        [self sizeFromNode:parentRenderElement found:&foundParentSize];
+    const CGFloat tolerance = 0.01;
+    return foundNodeSize && foundParentSize &&
+        fabs(nodeSize.width - parentSize.width) < tolerance &&
+        fabs(nodeSize.height - parentSize.height) < tolerance;
 }
 
 + (NSString *)parentDataDescriptionInValue:(id)value {

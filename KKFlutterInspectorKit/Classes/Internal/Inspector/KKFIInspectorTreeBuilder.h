@@ -16,6 +16,8 @@ NS_ASSUME_NONNULL_BEGIN
 + (nullable KKFIHierarchySnapshot *)
     snapshotFromLayoutPayload:(NSDictionary *)layoutPayload
                 widgetPayload:(nullable id)widgetPayload
+         widgetPropertiesByID:(NSDictionary<NSString *, NSArray *> *)widgetPropertiesByID
+          resolvedOffsetsByID:(NSDictionary<NSString *, NSValue *> *)resolvedOffsetsByID
                  rootObjectID:(NSString *)rootObjectID
              fallbackRootSize:(CGSize)fallbackRootSize
                     isolateID:(NSString *)isolateID

@@ -37,6 +37,7 @@ Pod::Spec.new do |s|
   ]
   s.private_header_files = [
     'KKFlutterInspectorKit/Classes/Internal/Connection/*.h',
+    'KKFlutterInspectorKit/Classes/Internal/Hierarchy/*.h',
     'KKFlutterInspectorKit/Classes/Internal/Inspector/*.h',
     'KKFlutterInspectorKit/Classes/Internal/Runtime/*.h',
     'KKFlutterInspectorKit/Classes/Internal/Session/*.h'
