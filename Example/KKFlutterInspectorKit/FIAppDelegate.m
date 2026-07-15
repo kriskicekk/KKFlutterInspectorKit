@@ -9,6 +9,7 @@
 #import "FIAppDelegate.h"
 
 #import <Flutter/Flutter.h>
+#import <PickViewServer/PickViewServerKit.h>
 
 @interface FIAppDelegate ()
 
@@ -30,6 +31,7 @@
         self.window.rootViewController = [[UINavigationController alloc]
             initWithRootViewController:rootViewController];
     }
+    [PickViewServer.sharedServer start];
     return YES;
 }
 
