@@ -8,7 +8,7 @@ load File.join(flutter_application_path, '.ios', 'Flutter', 'podhelper.rb')
 target 'KKFlutterInspectorKit_Example' do
   pod 'KKFlutterInspectorKit', :path => '../'
   pod 'PickViewCore', :path => '../../PickView'
-  pod 'PickViewServer', :path => '../../PickView'
+  pod 'PickViewServer/Flutter', :path => '../../PickView'
   install_all_flutter_pods(flutter_application_path)
 
   target 'KKFlutterInspectorKit_Tests' do
