@@ -18,6 +18,8 @@
 
 @property(nonatomic, strong) FlutterViewController *flutterViewController;
 @property(nonatomic, strong) KKFlutterInspector *inspector;
+@property(nonatomic, strong) UIBarButtonItem *treeBarButtonItem;
+@property(nonatomic) BOOL flutterStartupScheduled;
 
 @end
 
@@ -28,11 +30,13 @@
     [super viewDidLoad];
     self.title = @"Flutter";
     self.view.backgroundColor = UIColor.systemBackgroundColor;
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+    self.treeBarButtonItem = [[UIBarButtonItem alloc]
         initWithTitle:@"Tree"
                 style:UIBarButtonItemStylePlain
                target:self
                action:@selector(showTree:)];
+    self.treeBarButtonItem.enabled = NO;
+    self.navigationItem.rightBarButtonItem = self.treeBarButtonItem;
 
     self.inspector = [[KKFlutterInspector alloc] init];
     self.inspector.excludedWidgetTypes = [NSSet setWithArray:@[
@@ -41,9 +45,31 @@
         @"MaterialApp",
         @"InspectorExamplePage",
     ]];
+}
+
+- (void)viewDidAppear:(BOOL)animated
+{
+    [super viewDidAppear:animated];
+    if (self.flutterViewController != nil || self.flutterStartupScheduled) {
+        return;
+    }
+
+    self.flutterStartupScheduled = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self startAndAttachFlutter];
+    });
+}
+
+- (void)startAndAttachFlutter
+{
+    if (self.flutterViewController != nil) {
+        return;
+    }
+
     FIAppDelegate *appDelegate = (FIAppDelegate *)UIApplication.sharedApplication.delegate;
-    FlutterEngine *engine = appDelegate.flutterEngine;
+    FlutterEngine *engine = [appDelegate startFlutterEngineIfNeeded];
     if (engine == nil) {
+        self.flutterStartupScheduled = NO;
         return;
     }
 
@@ -52,6 +78,19 @@
              nibName:nil
               bundle:nil];
     self.flutterViewController = flutterViewController;
+    __weak typeof(self) weakSelf = self;
+    [flutterViewController setFlutterViewDidRenderCallback:^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = weakSelf;
+            if (self == nil) {
+                return;
+            }
+            self.treeBarButtonItem.enabled = YES;
+            if (self.view.window != nil) {
+                [self.inspector warmUpWindow:self.view.window];
+            }
+        });
+    }];
     [self addChildViewController:flutterViewController];
     flutterViewController.view.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:flutterViewController.view];
@@ -66,13 +105,6 @@
             constraintEqualToAnchor:self.view.bottomAnchor],
     ]];
     [flutterViewController didMoveToParentViewController:self];
-}
-
-- (void)viewDidAppear:(BOOL)animated {
-    [super viewDidAppear:animated];
-    if (self.view.window != nil) {
-        [self.inspector warmUpWindow:self.view.window];
-    }
 }
 
 - (void)showTree:(id)sender {

@@ -21,10 +21,6 @@
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
 {
-    self.flutterEngine = [[FlutterEngine alloc]
-        initWithName:@"com.kkflutterinspector.example"];
-    [self.flutterEngine runWithEntrypoint:nil];
-
     UIViewController *rootViewController = self.window.rootViewController;
     if (rootViewController != nil &&
         ![rootViewController isKindOfClass:UINavigationController.class]) {
@@ -33,6 +29,22 @@
     }
     [PickViewServer.sharedServer start];
     return YES;
+}
+
+- (FlutterEngine *)startFlutterEngineIfNeeded
+{
+    NSAssert(NSThread.isMainThread, @"FlutterEngine must be started on the main thread.");
+    if (self.flutterEngine != nil) {
+        return self.flutterEngine;
+    }
+
+    FlutterEngine *engine = [[FlutterEngine alloc]
+        initWithName:@"com.kkflutterinspector.example"];
+    if (![engine runWithEntrypoint:nil]) {
+        return nil;
+    }
+    self.flutterEngine = engine;
+    return engine;
 }
 
 - (void)applicationWillResignActive:(UIApplication *)application
